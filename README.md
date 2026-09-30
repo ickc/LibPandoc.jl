@@ -97,8 +97,8 @@ pandocjl -F other-filter input.md              # anything else: as pandoc does
   filter; see [libpandoc-rs](https://github.com/ickc/libpandoc-rs). It runs
   in wasmtime, sandboxed: it sees the current directory, read-only, and no
   network. It may call pandoc (libpandoc-rs's `libpandoc` crate built for
-  wasm): in pandoc's sandbox, with options that name no files, as
-  pandocrs and libpandoc.wasm's hosts allow.
+  wasm): in pandoc's sandbox, with options that name no files (libpandoc
+  checks them, `"untrusted"`, 1.7: the same for every host).
 
 Filters are looked for as pandoc does: as given, then in the user data
 directory's `filters/`. Install it as a [Julia app](https://pkgdocs.julialang.org/v1/apps/):

@@ -7,9 +7,9 @@
 # it sees only the directories it is given (the current one, read-only, by
 # default), no network. It may call pandoc through the imports of module
 # `libpandoc` (libpandoc-rs's `guest.rs`), which this host answers on this
-# process's pandoc, in pandoc's sandbox and only with options that neither
-# read nor write files, fetch nor run anything: as libpandoc-rs's `wasm.rs`
-# and libpandoc's `wasm-filter.mjs` do, with the same lists.
+# process's pandoc, marked `"untrusted": true`: libpandoc then allows pandoc's
+# sandbox only, and no options that read or write files, fetch or run anything
+# (its list, which every host shares).
 
 const libwasmtime = Wasmtime_jll.libwasmtime
 
@@ -241,7 +241,7 @@ function _import_convert(env::Ptr{Cvoid}, caller::Ptr{Cvoid}, args::Ptr{UInt64},
         run = _run(caller)
         input = has != 0 ? _guest_bytes(caller, i, il) : nothing
         _ret!(args, _answer!(run, () -> begin
-            opts = allowed(:convert, _guest_json(caller, o, ol))
+            opts = _untrusted(_guest_json(caller, o, ol))
             input === nothing && throw(PandocError("PandocOptionError", "a wasm filter gives convert its input"))
             _call_raw(:convert, JSON.json(opts), input)
         end))
@@ -254,9 +254,9 @@ function _import_read_many(env::Ptr{Cvoid}, caller::Ptr{Cvoid}, args::Ptr{UInt64
         run = _run(caller)
         _ret!(args, _answer!(run, () -> begin
             req = _guest_json(caller, p, l)
-            req isa AbstractDict || throw(PandocError("PandocOptionError", "read_many: not a request"))
+            req isa AbstractDict || _refuse("a request that isn't an object")
             req = Dict{String, Any}(req)
-            req["options"] = allowed(:read_many, get(req, "options", Dict{String, Any}()))
+            req["options"] = _untrusted(get(req, "options", Dict{String, Any}()))
             _call_raw(:read_many, JSON.json(req))
         end))
     end
@@ -267,10 +267,7 @@ function _import_query(env::Ptr{Cvoid}, caller::Ptr{Cvoid}, args::Ptr{UInt64}, n
         p, l = _arg(args, 1), _arg(args, 2)
         run = _run(caller)
         _ret!(args, _answer!(run, () -> begin
-            q = _guest_json(caller, p, l)
-            name = q isa AbstractDict ? get(q, "query", "") : ""
-            name in QUERIES || throw(PandocError("PandocOptionError", "query not allowed in a wasm filter: $name"))
-            _call_raw(:query, JSON.json(q))
+            _call_raw(:query, JSON.json(_untrusted(_guest_json(caller, p, l))))
         end))
     end
 end
@@ -306,50 +303,20 @@ end
 
 # -- what a wasm filter may ask of pandoc ----------------------------------------------
 
-"Options (defaults-file keys) a wasm filter may read with: none that name files."
-const READ_OPTIONS = ("from", "reader", "columns", "default-image-extension", "indented-code-classes",
-                      "preserve-tabs", "strip-comments", "tab-stop", "track-changes", "sandbox")
-
-"With `READ_OPTIONS`, those it may convert with: none that write files or run programs."
-const WRITE_OPTIONS = ("to", "writer", "ascii", "cite-method", "dpi", "email-obfuscation", "eol",
-                       "fail-if-warnings", "figure-caption-position", "html-math-method", "html-q-tags",
-                       "identifier-prefix", "incremental", "list-tables", "listings", "markdown-headings",
-                       "metadata", "number-offset", "number-sections", "reference-links",
-                       "reference-location", "reference-section-title", "section-divs",
-                       "shift-heading-level-by", "slide-level", "split-level", "standalone",
-                       "table-caption-position", "table-of-contents", "title-prefix", "toc", "toc-depth",
-                       "top-level-division", "variables", "verbosity", "wrap")
-
-"The queries a wasm filter may make (not `parse-args`, which reads defaults files, nor `default-template`)."
-const QUERIES = ("version", "api-version", "input-formats", "output-formats", "highlight-languages",
-                 "highlight-styles", "extensions-for-format", "num-threads")
-
-"""
-    allowed(call, options) -> Dict
-
-`options` as a wasm filter may give them to pandoc (`call` is `:convert` or
-`:read_many`), with pandoc's sandbox on; a `PandocError` names what isn't
-allowed.
-"""
-function allowed(call::Symbol, options)
-    refuse(what) = throw(PandocError("PandocOptionError", "not allowed in a wasm filter: $what"))
-    options isa AbstractDict || refuse("options that aren't an object")
-    o = Dict{String, Any}(options)
-    for (k, v) in o
-        k in READ_OPTIONS || (call === :convert && k in WRITE_OPTIONS) || refuse(k)
-        if k in ("from", "reader", "to", "writer")
-            f = v isa AbstractString ? v : ""
-            (_format_name(f) && !(f == "pdf" && k in ("to", "writer"))) || refuse("$k: $(JSON.json(v))")
-        end
-    end
-    o["sandbox"] = true
+# What a filter gives pandoc (options, or a query), marked `"untrusted": true`
+# for libpandoc (1.7) to check: it accepts only what reads and writes no files,
+# fetches nothing and runs nothing, and turns pandoc's sandbox on. The list is
+# libpandoc's, the same for every host.
+function _untrusted(x)
+    v = ccall(_load().abi_version, Cint, ())
+    v >= 1007 || _refuse("a call from a wasm filter needs libpandoc 1.7 (\"untrusted\"), not $(v ÷ 1000).$(v % 1000)")
+    x isa AbstractDict || _refuse("options that aren't an object")
+    o = Dict{String, Any}(x)
+    o["untrusted"] = true
     o
 end
 
-# A format's name with extensions (`commonmark_x+smart-raw_html`), not a path
-# to a Lua reader or writer.
-_format_name(f) = !isempty(f) && all(p -> !isempty(p) && all(c -> isascii(c) && (isletter(c) || isdigit(c) || c == '_'), p),
-                                     split(f, ['+', '-']))
+_refuse(what) = throw(PandocError("PandocOptionError", "not allowed for untrusted code: $what"))
 
 # -- the engine and the linker, shared by every filter ---------------------------
 

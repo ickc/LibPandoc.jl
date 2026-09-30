@@ -222,7 +222,7 @@ end
             Dict("read_many" => [["x"], Dict("from" => "markdown", "data-dir" => "/")]),
             Dict("query" => ["parse-args", Dict("args" => ["-d", "x.yaml"])])])
         @test all(r -> r["error"][1] == "PandocOptionError", refused)
-        @test contains(refused[1]["error"][2], "not allowed in a wasm filter: filters")
+        @test contains(refused[1]["error"][2], "not allowed for untrusted code: filters")
         # sandboxed: LaTeX's \input reads no file
         mktempdir() do d
             secret = joinpath(d, "secret.tex")

@@ -245,8 +245,41 @@ end
                 e
             end
             @test e isa FilterError && contains(sprint(showerror, e.exception), "exited with status 3")
+            # read-only, unless it is told otherwise
+            e = try
+                cd(() -> P.convert("```write\nout.txt\n```"; to = "plain", filters = [wasm("misbehave")]), d)
+            catch e
+                e
+            end
+            @test e isa FilterError && !isfile(joinpath(d, "out.txt"))
+            cd(() -> P.convert("```write\nout.txt\n```"; to = "plain",
+                               filters = [WasmFilter(wasm("misbehave"); writable = true)]), d)
+            @test isfile(joinpath(d, "out.txt"))
         end
+        # limits: time and memory
+        failure(f, input) = try
+            P.convert(input; to = "plain", filters = [f])
+            nothing
+        catch e
+            e isa FilterError ? sprint(showerror, e.exception) : rethrow()
+        end
+        t = @elapsed msg = failure(WasmFilter(wasm("misbehave"); timeout = 0.3), "```spin\n```")
+        @test contains(msg, "its time limit") && t < 10
+        @test contains(failure(WasmFilter(wasm("misbehave"); max_memory = 64 << 20), "```hog\n```"),
+                       "memory limit: 67108864 bytes")
+        withenv("LIBPANDOC_WASM_TIMEOUT" => "0.3", "LIBPANDOC_WASM_MAX_MEMORY" => "64m") do
+            @test contains(failure(wasm("misbehave"), "```spin\n```"), "its time limit")
+            @test contains(failure(wasm("misbehave"), "```hog\n```"), "memory limit: 67108864 bytes")
+            @test failure(wasm("upper"), "hi") === nothing
+        end
+        @test failure(WasmFilter(wasm("upper"); timeout = 60, max_memory = 1 << 30), "hi") === nothing
     end
+    @test LibPandoc._parse_timeout("2") == 2.0 && LibPandoc._parse_timeout("0.5") == 0.5
+    @test LibPandoc._parse_timeout("") === nothing && LibPandoc._parse_timeout("0") === nothing
+    @test_throws ErrorException LibPandoc._parse_timeout("2s")
+    @test LibPandoc._parse_memory("512M") == 512 << 20 && LibPandoc._parse_memory("64k") == 64 << 10
+    @test LibPandoc._parse_memory("4096") == 4096 && LibPandoc._parse_memory("") === nothing
+    @test_throws ErrorException LibPandoc._parse_memory("12x")
 end
 
 @testset "pandocjl" begin

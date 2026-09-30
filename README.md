@@ -98,7 +98,17 @@ pandocjl -F other-filter input.md              # anything else: as pandoc does
   in wasmtime, sandboxed: it sees the current directory, read-only, and no
   network. It may call pandoc (libpandoc-rs's `libpandoc` crate built for
   wasm): in pandoc's sandbox, with options that name no files (libpandoc
-  checks them, `"untrusted"`, 1.7: the same for every host).
+  checks them, `"untrusted"`, 1.7: the same for every host). Limits, which
+  pandoc has for no filter: `$LIBPANDOC_WASM_TIMEOUT` (seconds, as
+  pandoc-server's `--timeout`; its calls to pandoc included) and
+  `$LIBPANDOC_WASM_MAX_MEMORY` (bytes, or with `k`, `m`, `g`, as pandoc's
+  `+RTS -M`) stop a filter past them; none by default, as pandoc.
+  `WasmFilter(path; timeout, max_memory)` for one filter.
+
+  Unlike Julia, Lua and JSON filters, which can do anything you can
+  (pandoc's `--sandbox` doesn't limit filters), a wasm filter can't reach
+  past these bounds whatever pandoc's options: a filter from anywhere risks
+  the document, not your machine.
 
 Filters are looked for as pandoc does: as given, then in the user data
 directory's `filters/`. Install it as a [Julia app](https://pkgdocs.julialang.org/v1/apps/):

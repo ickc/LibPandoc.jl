@@ -17,7 +17,8 @@ function pandocjl(args...; input = "", env = Dict{String, String}(), dir = pwd()
     cmd = `$(Base.julia_cmd()) --startup-file=no --project=$PROJECT -m LibPandoc $args`
     out, err = IOBuffer(), IOBuffer()
     p = cd(() -> Base.run(pipeline(ignorestatus(addenv(cmd, env)); stdin = IOBuffer(input), stdout = out, stderr = err)), dir)
-    p.exitcode, String(take!(out)), String(take!(err))
+    # pandoc writes native line endings (CRLF on Windows) to files and stdout
+    p.exitcode, replace(String(take!(out)), "\r\n" => "\n"), String(take!(err))
 end
 
 upper(s::Str) = Str(uppercase(s.text))
@@ -36,7 +37,7 @@ demote(h::Header) = (h.level += 1; nothing)
         Base.write(f, "*a*")
         @test P.convert(; input_files = [f], to = "html") == "<p><em>a</em></p>\n"
         @test P.convert("x"; to = "html", output_file = joinpath(d, "o.html")) == ""
-        @test Base.read(joinpath(d, "o.html"), String) == "<p>x</p>\n"
+        @test replace(Base.read(joinpath(d, "o.html"), String), "\r\n" => "\n") == "<p>x</p>\n"   # native line endings
     end
     @test P.convert(codeunits("*b*"); to = "plain") == "b\n"
 end

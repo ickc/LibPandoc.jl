@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  # run by hand after libpandoc's `continuous` release changes
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, Julia ${{ matrix.julia }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        julia: ["1.12"]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15-intel, macos-15, windows-latest]
+        include:
+          - { os: ubuntu-24.04, julia: "1" }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia }}
+      - uses: julia-actions/cache@v2
+      # libpandoc-rs's example filters built for wasm, for the wasm filter tests
+      - name: wasm filters
+        if: matrix.os == 'ubuntu-24.04'
+        shell: bash
+        run: |
+          rustup target add wasm32-wasip1
+          git clone --depth 1 https://github.com/ickc/libpandoc-rs "$RUNNER_TEMP/libpandoc-rs"
+          (cd "$RUNNER_TEMP/libpandoc-rs/filters" && cargo build --release --target wasm32-wasip1 --quiet)
+          echo "LIBPANDOC_WASM_FILTERS=$RUNNER_TEMP/libpandoc-rs/filters/target/wasm32-wasip1/release" >> "$GITHUB_ENV"
+      # no libpandoc installed: the package downloads libpandoc's release, as for a user
+      - uses: julia-actions/julia-buildpkg@v1
+      - name: Test
+        shell: bash
+        run: julia --threads=2 --project -e 'import Pkg; Pkg.test()'
+      - name: pandocjl as an app
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          julia -e 'import Pkg; Pkg.Apps.develop(path=".")'
+          out=$(echo '*hi*' | ~/.julia/bin/pandocjl -t html)
+          echo "$out"
+          [[ $out == '<p><em>hi</em></p>' ]]

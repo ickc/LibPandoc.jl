@@ -1,0 +1,37 @@
+name = "LibPandoc"
+uuid = "4962b8c0-3581-43f2-bdfd-d699272e797e"
+authors = ["Kolen Cheung <christian.kolen@gmail.com>"]
+version = "0.1.0"
+
+[deps]
+CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"
+Downloads = "f43a241f-c20a-4ad4-852c-f6b1247861c6"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
+Panir = "5b2d8b07-d308-4414-b8d3-1709445610f6"
+PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
+Tar = "a4e569a6-e804-4fa4-b0f3-eef7a1d5b13e"
+Wasmtime_jll = "d20e7296-4f3e-515c-90b9-d2595a77bf72"
+
+[sources]
+Panir = {url = "https://github.com/ickc/panir", subdir = "julia"}
+
+[compat]
+CodecZlib = "0.7"
+Downloads = "1"
+JSON = "1"
+Libdl = "1"
+Panir = "0.1"
+PrecompileTools = "1"
+Tar = "1"
+Wasmtime_jll = "46"
+julia = "1.12"
+
+[apps]
+pandocjl = {}
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

@@ -49,6 +49,29 @@ end
     @test_logs (:warn, r"Could not fetch|not found|Could not find"i) match_mode = :any P.convert("![](nowhere.png)"; to = "docx")
 end
 
+@testset "untrusted" begin
+    # libpandoc's "untrusted": only options that read, write, fetch and run
+    # nothing, with pandoc's sandbox on
+    @test P.convert("*hi*"; to = "html", untrusted = true) == "<p><em>hi</em></p>\n"
+    mktempdir() do d
+        for opts in [(citeproc = true,), (filters = ["x.lua"],), (output_file = joinpath(d, "o"),),
+                     (to = "pdf",), (data_dir = d,)]
+            e = try
+                P.convert("x"; to = "html", untrusted = true, opts...)
+            catch e
+                e
+            end
+            @test e isa PandocError && contains(e.message, "not allowed for untrusted code")
+        end
+        secret = joinpath(d, "secret.tex")
+        Base.write(secret, "SECRET")
+        tex = "\\input{$(replace(secret, '\\' => '/'))}"   # / on Windows too, for LaTeX
+        @test contains(P.convert(tex; from = "latex", to = "plain"), "SECRET")
+        out = @test_logs (:warn, r"Could not load include file") match_mode = :any P.convert(tex; from = "latex", to = "plain", untrusted = true)
+        @test !contains(out, "SECRET")
+    end
+end
+
 @testset "run" begin
     @test String(P.run(["-f", "markdown", "-t", "latex"]; input = "*hi*")) == "\\emph{hi}\n"
     @test_throws PandocError P.run(["--version"])

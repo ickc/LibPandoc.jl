@@ -34,6 +34,10 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
 - **Threads:** conversions from different tasks and threads run in
   parallel, on pandoc's own threads: one per logical core, or
   `$LIBPANDOC_NUM_THREADS`; `num_threads()` and `set_num_threads(n)`.
+- **Untrusted input:** `untrusted = true` accepts only options that read
+  no files, write none, fetch nothing and run nothing, with pandoc's
+  sandbox on (libpandoc's list; anything else throws a `PandocError`
+  naming it): for documents or options from someone you don't trust.
 - **Queries:** `pandoc_version()`, `api_version()`, `input_formats()`,
   `output_formats()`, `extensions(format)`, `default_template(format)`,
   `query(name; params...)`.

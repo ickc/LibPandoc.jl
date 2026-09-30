@@ -24,14 +24,14 @@ query(name::AbstractString; params...) =
 
 const _VERSION = Ref{Union{Nothing, String}}(nothing)
 
-# as pandoc writes it ("3.11"), for PANDOC_VERSION
+# as pandoc writes it ("3.12"), for PANDOC_VERSION
 function _version_string()
     v = _VERSION[]
     v === nothing || return v
     _VERSION[] = String(query("version"))
 end
 
-"The version of the pandoc library in use, e.g. `v\"3.11.0\"`."
+"The version of the pandoc library in use, e.g. `v\"3.12.0\"`."
 pandoc_version() = VersionNumber(_version_string())
 
 "The pandoc-types API version of its AST, e.g. `(1, 23, 1)`."

@@ -114,10 +114,11 @@ pkg> app add https://github.com/ickc/LibPandoc.jl   # ~/.julia/bin/pandocjl
 Julia compiles code as it first runs it. The package and Panir.jl
 precompile a workload (a document with every kind of node, pandocjl's
 path, the wasm host), so pandocjl on pandoc's MANUAL (300 KB) takes
-0.77 s against pandoc's 0.56 s, and 1.3 s with a Julia script filter
-(a filter's first document still compiles some). What is left is Julia's
-own start and loading. For less, a system image with LibPandoc compiled
-in: 0.66 s, and 0.83 s with the script filter.
+0.78 s against pandoc's 0.58 s, and 1.1 s with a Julia script filter
+(pandocpy with a Python one: 0.77 s). What is left is Julia's own start
+and loading, and some compiling on a filter's first document. For less, a
+system image with LibPandoc compiled in: 0.66 s, and 0.84 s with the
+script filter.
 
 ```julia
 using PackageCompiler
@@ -128,8 +129,8 @@ julia -J pandocjl.so --startup-file=no -m LibPandoc ARGS
 ```
 
 Or, many documents, convert them from one Julia session: after the first,
-a Julia filter adds about what a Python one does (MANUAL: +160–190 ms to
-pandoc's 290 ms).
+a Julia filter adds about what a Python one does (MANUAL: +170–220 ms to
+pandoc's 284 ms).
 
 ## Installing
 

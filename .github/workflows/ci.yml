@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
   # run by hand after libpandoc's `continuous` release changes
   workflow_dispatch:

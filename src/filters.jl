@@ -19,8 +19,7 @@ end
 over to `pandocjl`, which runs the script in its process.
 """
 function Panir.run_filter(r::RawFilter; traverse::Symbol = :typewise)
-    h = get(task_local_storage(), Panir._HANDOFF, nothing)
-    h === nothing || (h[] = (r, traverse); return nothing)
+    Panir.hand_over(r, traverse) && return nothing
     out = r.f(Base.read(stdin, String), Conversion(ARGS, ENV))
     Base.write(stdout, out)
     nothing
@@ -45,7 +44,6 @@ function _walks(group::Vector{Pair{Any, Symbol}}, @nospecialize(options))
         doc = Panir.parse(json)
         for (f, traverse) in group
             doc = walk!(f, doc; traverse, format = c)
-            doc isa Panir.Pandoc || throw(ArgumentError("the filter $f made a $(typeof(doc)), not a Pandoc"))
         end
         Panir.serialize(doc)
     end

@@ -131,16 +131,21 @@ path, the wasm host), so pandocjl on pandoc's MANUAL (300 KB) takes
 0.78 s against pandoc's 0.58 s, and 1.1 s with a Julia script filter
 (pandocpy with a Python one: 0.77 s). What is left is Julia's own start
 and loading, and some compiling on a filter's first document. For less, a
-system image with LibPandoc compiled in: 0.66 s, and 0.84 s with the
-script filter.
+system image with LibPandoc and Panir compiled in: 0.66 s, and 0.84 s with
+the script filter. In a clone of this repository:
 
-```julia
-using PackageCompiler
-create_sysimage(["LibPandoc"]; sysimage_path = "pandocjl.so")
-```
 ```sh
-julia -J pandocjl.so --startup-file=no -m LibPandoc ARGS
+julia sysimage/build.jl [IMAGE [PROJECT]]
+julia -J IMAGE --project=PROJECT --startup-file=no -m LibPandoc ARGS
 ```
+
+PROJECT is the environment pandocjl runs in (default: the clone, as the
+app runs when developed from it, `pkg> app develop .`: then `pandocjl -J
+IMAGE -- ARGS`), IMAGE `pandocjl.so` in it by default. The image works
+only with the Julia that built it (the app's: `julia_command` in
+`~/.julia/environments/apps/AppManifest.toml`) and keeps the packages as
+they were: rebuild it after updating them. `IMAGE.txt` records what it was
+built from (`sysimage/build.jl` says what matters).
 
 Or, many documents, convert them from one Julia session: after the first,
 a Julia filter adds about what a Python one does (MANUAL: +170–220 ms to

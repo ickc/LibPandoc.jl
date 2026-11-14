@@ -53,3 +53,29 @@ jobs:
           out=$(echo '*hi*' | ~/.julia/bin/pandocjl -t html)
           echo "$out"
           [[ $out == '<p><em>hi</em></p>' ]]
+
+  # pandocjl's system image (sysimage/build.jl), built and used once so the
+  # script keeps working; not kept (a native image fits this runner's CPU)
+  sysimage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: "1"
+      - uses: julia-actions/cache@v3
+      # instantiates this repository's environment; precompile.jl downloads
+      # libpandoc's release, as for a user
+      - name: Build
+        run: julia sysimage/build.jl "$RUNNER_TEMP/pandocjl.so"
+      - name: pandocjl with it
+        shell: bash
+        run: |
+          pandocjl() { julia -J "$RUNNER_TEMP/pandocjl.so" --project=. --startup-file=no -m LibPandoc "$@"; }
+          out=$(echo '*hi*' | pandocjl -t html)
+          echo "$out"
+          [[ $out == '<p><em>hi</em></p>' ]]
+          printf 'using Panir\nrun_filter(s::Str -> Str(uppercase(s.text)))\n' > "$RUNNER_TEMP/upper.jl"
+          out=$(echo '*hi*' | pandocjl -t html -F "$RUNNER_TEMP/upper.jl")
+          echo "$out"
+          [[ $out == '<p><em>HI</em></p>' ]]

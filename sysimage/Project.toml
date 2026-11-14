@@ -1,0 +1,8 @@
+# PackageCompiler for build.jl, pinned: the image it builds is determined
+# by Julia, the target environment's Manifest, precompile.jl and the CPU
+# target (build.jl); this only fixes the tool.
+[deps]
+PackageCompiler = "9b87118b-4619-50d2-8e1e-99f35a4d4d9d"
+
+[compat]
+PackageCompiler = "=2.4.5"

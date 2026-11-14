@@ -54,7 +54,8 @@ end
     # nothing, with pandoc's sandbox on
     @test P.convert("*hi*"; to = "html", untrusted = true) == "<p><em>hi</em></p>\n"
     mktempdir() do d
-        for opts in [(citeproc = true,), (filters = ["x.lua"],), (output_file = joinpath(d, "o"),),
+        # (citeproc: refused before libpandoc 1.8, which runs it inside the sandbox)
+        for opts in [(filters = ["x.lua"],), (output_file = joinpath(d, "o"),),
                      (to = "pdf",), (data_dir = d,)]
             e = try
                 P.convert("x"; to = "html", untrusted = true, opts...)

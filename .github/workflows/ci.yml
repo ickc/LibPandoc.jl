@@ -25,11 +25,11 @@ jobs:
         include:
           - { os: ubuntu-24.04, julia: "1" }
     steps:
-      - uses: actions/checkout@v5
-      - uses: julia-actions/setup-julia@v2
+      - uses: actions/checkout@v7
+      - uses: julia-actions/setup-julia@v3
         with:
           version: ${{ matrix.julia }}
-      - uses: julia-actions/cache@v2
+      - uses: julia-actions/cache@v3
       # libpandoc-rs's example filters built for wasm, for the wasm filter tests
       - name: wasm filters
         if: matrix.os == 'ubuntu-24.04'

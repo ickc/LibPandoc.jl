@@ -386,11 +386,19 @@ end
 const _CLOCK = Ref{Any}(nothing)   # the clock thread's handle, once started
 
 # The clock thread's loop: sleep (letting the GC run meanwhile), then advance
-# the epoch.
+# the epoch by the time that has passed, in _TICKs. By the time passed, not
+# by the sleeps: a system may stretch a short sleep (macOS does), and a
+# limit then comes late.
 function _clock(engine::Ptr{Cvoid})::Cvoid
+    tick = round(UInt64, 1e9 * _TICK)
+    started, done = time_ns(), UInt64(0)
     while true
         @ccall gc_safe = true uv_sleep(round(Cuint, 1000 * _TICK)::Cuint)::Cvoid
-        @ccall libwasmtime.wasmtime_engine_increment_epoch(engine::Ptr{Cvoid})::Cvoid
+        due = (time_ns() - started) ÷ tick
+        for _ in (done + 1):due
+            @ccall libwasmtime.wasmtime_engine_increment_epoch(engine::Ptr{Cvoid})::Cvoid
+        end
+        done = due
     end
 end
 

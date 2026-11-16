@@ -161,6 +161,18 @@ end
 @testset "threads" begin
     outs = fetch.([Threads.@spawn P.convert("t$i *x*"; to = "plain", filters = [upper]) for i in 1:40])
     @test outs == ["T$i X\n" for i in 1:40]
+    # the number in effect: set (before pandoc's threads have grown) or not
+    @test P.set_num_threads(1) == P.num_threads() >= 1
+end
+
+@testset "versions" begin
+    # the same major, a minor at least the one relied on
+    v = 1000P.ABI_MAJOR + P.ABI_MINOR
+    @test P.ABI_MINOR >= 11 && P._abi_ok(v) && P._abi_ok(v + 1)
+    @test !P._abi_ok(v - 1) && !P._abi_ok(v + 1000)
+    e = try P._abi_check(1007, "old/libpandoc.so") catch e; e end
+    @test e isa ErrorException && contains(e.msg, "ABI 1.7") && contains(e.msg, "needs 1.$(P.ABI_MINOR)")
+    @test P._abi_ok(ccall(P._load().abi_version, Cint, ()))
 end
 
 @testset "scripts" begin

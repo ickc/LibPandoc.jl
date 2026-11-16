@@ -342,12 +342,10 @@ end
 # -- what a wasm filter may ask of pandoc ----------------------------------------------
 
 # What a filter gives pandoc (options, or a query), marked `"untrusted": true`
-# for libpandoc (1.7) to check: it accepts only what reads and writes no files,
+# for libpandoc to check: it accepts only what reads and writes no files,
 # fetches nothing and runs nothing, and turns pandoc's sandbox on. The list is
 # libpandoc's, the same for every host.
 function _untrusted(x)
-    v = ccall(_load().abi_version, Cint, ())
-    v >= 1007 || _refuse("a call from a wasm filter needs libpandoc 1.7 (\"untrusted\"), not $(v ÷ 1000).$(v % 1000)")
     x isa AbstractDict || _refuse("options that aren't an object")
     o = Dict{String, Any}(x)
     o["untrusted"] = true

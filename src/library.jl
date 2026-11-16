@@ -94,23 +94,32 @@ end
 const _SYMS = Ref{Union{Nothing, _Syms}}(nothing)
 const _LOAD_LOCK = ReentrantLock()
 
-# The ABI version this package is written against (libpandoc.h).
+# The ABI version this package relies on (libpandoc.h): a library with the
+# same major and a minor at least this one works (libpandoc.h, Versions).
 const ABI_MAJOR = 1
-const ABI_MINOR = 6
+const ABI_MINOR = 11
+
+# Whether a library's pandoc_abi_version() is one this package works with.
+_abi_ok(v::Integer) = v ÷ 1000 == ABI_MAJOR && v % 1000 >= ABI_MINOR
+
+function _abi_check(v::Integer, path)
+    _abi_ok(v) || error("libpandoc at $path has ABI $(v ÷ 1000).$(v % 1000); LibPandoc.jl needs " *
+                        "$ABI_MAJOR.$ABI_MINOR or a later $ABI_MAJOR.x")
+end
 
 function _load()
     s = _SYMS[]
     s === nothing || return s
     lock(_LOAD_LOCK) do
         _SYMS[] === nothing || return _SYMS[]
-        h = Libdl.dlopen(library_path())
+        path = library_path()
+        h = Libdl.dlopen(path)
         f(name) = Libdl.dlsym(h, Symbol("pandoc_", name))
         s = _Syms((f(n) for n in (:init, :abi_version, :set_num_threads, :convert, :convert_args,
                                    :convert_filters, :convert_args_filters, :main, :read_many,
                                    :query, :result_free, :buffer_set))...)
-        v = ccall(s.abi_version, Cint, ())
-        (v ÷ 1000 == ABI_MAJOR && v % 1000 >= ABI_MINOR) || error(
-            "libpandoc's ABI is $(v ÷ 1000).$(v % 1000); this package needs $ABI_MAJOR.$ABI_MINOR or later")
+        # before anything else: an older library's meanings differ
+        _abi_check(ccall(s.abi_version, Cint, ()), path)
         ccall(s.init, Cint, ()) == 0 || error("libpandoc: the Haskell runtime didn't start")
         _SYMS[] = s
     end

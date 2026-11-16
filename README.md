@@ -33,7 +33,9 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
   with `@warn`.
 - **Threads:** conversions from different tasks and threads run in
   parallel, on pandoc's own threads: one per logical core, or
-  `$LIBPANDOC_NUM_THREADS`; `num_threads()` and `set_num_threads(n)`.
+  `$LIBPANDOC_NUM_THREADS`; `num_threads()`. `set_num_threads(n)` sets the
+  number only before pandoc first runs something in parallel (it grows to
+  it then, once), and returns the number in effect.
 - **Untrusted input:** `untrusted = true` accepts only options that read
   no files, write none, fetch nothing and run nothing, with pandoc's
   sandbox on (libpandoc's list; anything else throws a `PandocError`
@@ -102,7 +104,7 @@ pandocjl -F other-filter input.md              # anything else: as pandoc does
   in wasmtime, sandboxed: it sees the current directory, read-only, and no
   network. It may call pandoc (libpandoc-rs's `libpandoc` crate built for
   wasm): in pandoc's sandbox, with options that name no files (libpandoc
-  checks them, `"untrusted"`, 1.7: the same for every host). Limits, which
+  checks them, `"untrusted"`: the same for every host). Limits, which
   pandoc has for no filter: `$LIBPANDOC_WASM_TIMEOUT` (seconds, as
   pandoc-server's `--timeout`; its calls to pandoc included) and
   `$LIBPANDOC_WASM_MAX_MEMORY` (bytes, or with `k`, `m`, `g`, as pandoc's
@@ -153,7 +155,8 @@ pandoc's 284 ms).
 
 ## Installing
 
-LibPandoc.jl needs Julia 1.12 or later. It finds libpandoc:
+LibPandoc.jl needs Julia 1.12 or later, and libpandoc 1.11 or a later
+1.x (its ABI version, checked when the library is loaded). It finds libpandoc:
 `$LIBPANDOC_PATH` (the library), else `$LIBPANDOC_PREFIX` or
 `$CONDA_PREFIX` (a prefix with `lib/libpandoc.so`, `.dylib`, or
 `bin/pandoc.dll`), else libpandoc's release build, downloaded once into

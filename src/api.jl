@@ -50,14 +50,26 @@ extensions(format::AbstractString) = Dict{String, Bool}(query("extensions-for-fo
 default_template(format::AbstractString) = String(query("default-template"; format))
 
 """
-How many threads pandoc runs on: one per logical core this process may use,
-unless `\$LIBPANDOC_NUM_THREADS` (read at start) or `set_num_threads` says
-otherwise. Conversions from different Julia tasks and threads, and
-`read_many`, run in parallel on them.
+How many threads pandoc runs on (or, before it has grown to them, will):
+one per logical core this process may use, unless `\$LIBPANDOC_NUM_THREADS`
+or [`set_num_threads`](@ref) says otherwise. pandoc starts on one and grows
+to that number once, the first time it runs something in parallel (calls
+from two threads at once, or `read_many` of several texts). Conversions
+from different Julia tasks and threads, and `read_many`, run in parallel on
+them.
 """
 num_threads() = Int(query("num-threads"))
 
-"Run pandoc on `n` threads from now on (at least 1); the new number."
+"""
+    set_num_threads(n) -> Int
+
+The number of threads pandoc is to grow to (see [`num_threads`](@ref)),
+clamped to between 1 and one per logical core this process may use; the
+number in effect. Only until pandoc has grown: after that it changes
+nothing, and returns the number pandoc runs on. So a result other than `n`
+means `n` was out of range, or came too late: set it before the first
+conversions run in parallel.
+"""
 set_num_threads(n::Integer) = Int(ccall(_load().set_num_threads, Cint, (Cint,), n))
 
 const _BINARY = ("docx", "odt", "epub", "epub2", "epub3", "pptx", "pdf", "chunkedhtml", "xlsx")

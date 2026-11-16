@@ -25,6 +25,9 @@ function _download_root()
     joinpath(base, "libpandoc")
 end
 
+# Where the release build is unpacked.
+_download_prefix() = joinpath(_download_root(), RELEASE, _target())
+
 """
     LibPandoc.library_path()
 
@@ -34,7 +37,9 @@ The libpandoc this package loads: the first of
   `.dylib`, or `bin/pandoc.dll`), as libpandoc-python and libpandoc-rs;
 - libpandoc's release build, downloaded once into `\$LIBPANDOC_DOWNLOAD_DIR`,
   else the user's data directory (`~/.local/share/libpandoc/$RELEASE/<target>`),
-  where libpandoc-rs keeps it too.
+  where libpandoc-rs keeps it too. The download is checked against the
+  release's `SHA256SUMS`. It is not downloaded again: one too old for this
+  package fails when it is loaded, saying to remove it.
 """
 function library_path(; download::Bool = true)
     p = get(ENV, "LIBPANDOC_PATH", "")
@@ -46,7 +51,7 @@ function library_path(; download::Bool = true)
         isfile(lib) && return lib
         var == "LIBPANDOC_PREFIX" && error("\$LIBPANDOC_PREFIX: no $(_libname()) in $prefix")
     end
-    prefix = joinpath(_download_root(), RELEASE, _target())
+    prefix = _download_prefix()
     lib = joinpath(prefix, _libname())
     isfile(lib) && return lib
     download || error("libpandoc not found (set \$LIBPANDOC_PREFIX)")
@@ -58,7 +63,8 @@ function _download(prefix)
     url = get(ENV, "LIBPANDOC_DOWNLOAD_URL",
               "https://github.com/ickc/libpandoc/releases/download/$RELEASE/libpandoc-$(_target()).tar.gz")
     @info "Downloading libpandoc ($RELEASE, $(_target())) into $prefix"
-    tarball = isfile(url) ? url : Downloads.download(url)
+    tarball = _fetch(url)
+    _check_sum(url, tarball)
     # unpacked beside, then moved into place: never half there
     mkpath(dirname(prefix))
     tmp = "$prefix.tmp$(getpid())"
@@ -72,6 +78,40 @@ function _download(prefix)
         rm(tmp; force = true, recursive = true)  # another process got there first
     end
     isfile(joinpath(prefix, _libname())) || error("$url: no $(_libname()) in it")
+    nothing
+end
+
+# A local file as it is (a mirror, offline), else downloaded into a temporary file.
+_fetch(url) = isfile(url) ? url : Downloads.download(url)
+
+# `url`'s directory and file name (a local path, or a URL).
+_split_url(url) = isfile(url) ? (dirname(url), basename(url)) :
+                  (i = findlast('/', url); i === nothing ? ("", url) : (url[1:prevind(url, i)], url[i + 1:end]))
+
+"""
+The file downloaded from `url` against the release's `SHA256SUMS` beside it
+(`sha256sum`'s lines; libpandoc's releases have one since 1.12): that it
+arrived whole and is not half replaced (`continuous` changes file by file),
+not that it is the one meant (the sums come from the same place). A
+mismatch, a file it doesn't list, or no `SHA256SUMS` is an error.
+"""
+function _check_sum(url, file)
+    dir, name = _split_url(url)
+    sums_url = isfile(url) ? joinpath(dir, "SHA256SUMS") : "$dir/SHA256SUMS"
+    sums = try
+        Base.read(_fetch(sums_url), String)
+    catch e
+        error("$sums_url, to check $name: $(sprint(showerror, e))")
+    end
+    want = nothing
+    for line in eachline(IOBuffer(sums))
+        m = match(r"^([0-9a-fA-F]{64}) [ *](.+?)\r?$", line)
+        m !== nothing && m[2] == name && (want = lowercase(m[1]); break)
+    end
+    want === nothing && error("$name is not in $sums_url")
+    got = bytes2hex(open(SHA.sha256, file))
+    got == want || error("$url: SHA-256 $got, but $sums_url says $want " *
+                         "(the release may be being replaced: try again in a few minutes)")
     nothing
 end
 
@@ -103,8 +143,14 @@ const ABI_MINOR = 11
 _abi_ok(v::Integer) = v ÷ 1000 == ABI_MAJOR && v % 1000 >= ABI_MINOR
 
 function _abi_check(v::Integer, path)
-    _abi_ok(v) || error("libpandoc at $path has ABI $(v ÷ 1000).$(v % 1000); LibPandoc.jl needs " *
-                        "$ABI_MAJOR.$ABI_MINOR or a later $ABI_MAJOR.x")
+    _abi_ok(v) && return
+    msg = "libpandoc at $path has ABI $(v ÷ 1000).$(v % 1000); LibPandoc.jl needs " *
+          "$ABI_MAJOR.$ABI_MINOR or a later $ABI_MAJOR.x"
+    # an old download, which is never refreshed by itself
+    path == joinpath(_download_prefix(), _libname()) &&
+        (msg *= ". It is an earlier download of libpandoc's release: remove $(_download_prefix()) " *
+                "to download the current one (libpandoc-rs shares it: rebuild that after)")
+    error(msg)
 end
 
 function _load()

@@ -2,6 +2,7 @@ using Test
 using LibPandoc, Panir
 import LibPandoc as P
 const JSON = P.JSON
+import CodecZlib, SHA, Tar
 
 # The example wasm filters of libpandoc-rs (filters/, built for
 # wasm32-wasip1), if given: $LIBPANDOC_WASM_FILTERS.
@@ -195,6 +196,38 @@ end
     e = try P._abi_check(1007, "old/libpandoc.so") catch e; e end
     @test e isa ErrorException && contains(e.msg, "ABI 1.7") && contains(e.msg, "needs 1.$(P.ABI_MINOR)")
     @test P._abi_ok(ccall(P._load().abi_version, Cint, ()))
+    # an old download says how to refresh it
+    withenv("LIBPANDOC_DOWNLOAD_DIR" => mktempdir()) do
+        e = try P._abi_check(1007, joinpath(P._download_prefix(), P._libname())) catch e; e end
+        @test contains(e.msg, "remove $(P._download_prefix())")
+    end
+end
+
+@testset "downloads are checked" begin
+    mktempdir() do d
+        # a release of one tarball, as libpandoc's, and its SHA256SUMS
+        name = "libpandoc-$(P._target()).tar.gz"
+        tree = mkpath(joinpath(d, "tree", dirname(P._libname())))
+        Base.write(joinpath(d, "tree", P._libname()), "not really a library")
+        tarball = joinpath(d, name)
+        open(io -> (z = CodecZlib.GzipCompressorStream(io); Tar.create(joinpath(d, "tree"), z); close(z)), tarball, "w")
+        sum = bytes2hex(open(SHA.sha256, tarball))
+        sums(text) = Base.write(joinpath(d, "SHA256SUMS"), text)
+        download(to) = withenv(() -> (try P._download(to); nothing catch e; e.msg end), "LIBPANDOC_DOWNLOAD_URL" => tarball)
+        sums("$(repeat("0", 64))  other.tar.gz\n$sum  $name\n")
+        @test (@test_logs (:info, r"Downloading") download(joinpath(d, "ok"))) === nothing
+        @test isfile(joinpath(d, "ok", P._libname()))
+        sums("$(repeat("0", 64))  $name\n")
+        @test contains(@test_logs((:info,), download(joinpath(d, "bad"))), "but $(joinpath(d, "SHA256SUMS")) says")
+        @test !ispath(joinpath(d, "bad"))
+        sums("$sum  other.tar.gz\n")
+        @test contains(@test_logs((:info,), download(joinpath(d, "missing"))), "$name is not in")
+        rm(joinpath(d, "SHA256SUMS"))
+        @test contains(@test_logs((:info,), download(joinpath(d, "none"))), "SHA256SUMS, to check $name")
+        @test !ispath(joinpath(d, "missing")) && !ispath(joinpath(d, "none"))
+    end
+    @test P._split_url("https://h/x/releases/download/continuous/a.tar.gz") ==
+          ("https://h/x/releases/download/continuous", "a.tar.gz")
 end
 
 @testset "scripts" begin

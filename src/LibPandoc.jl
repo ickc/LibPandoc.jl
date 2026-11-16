@@ -45,6 +45,7 @@ import JSON
 import Libdl
 import Downloads
 import Tar
+import SHA
 using CodecZlib: GzipDecompressorStream
 import Wasmtime_jll
 using PrecompileTools: @setup_workload, @compile_workload

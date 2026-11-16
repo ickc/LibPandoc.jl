@@ -175,6 +175,12 @@ LibPandoc.jl needs Julia 1.12 or later, and libpandoc 1.11 or a later
 libpandoc-rs keeps it too. Linux (x86-64, aarch64), macOS (Intel, Apple
 silicon) and Windows (x86-64).
 
+The download is checked against the release's `SHA256SUMS`: that it
+arrived whole, not that it is the one meant (the sums come from the same
+release). It is the `continuous` release, which changes, but the copy is
+not downloaded again by itself: one too old for this package fails when
+it is loaded, naming the directory to remove to download the current one.
+
 Status: a prototype.
 
 ## License

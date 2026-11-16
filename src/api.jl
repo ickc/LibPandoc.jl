@@ -273,7 +273,7 @@ const _READ_MANY_OPTIONS = ("from", "reader", "abbreviations", "data-dir", "defa
 
 # The conversion's options that also apply to reading a fragment of it.
 const _READ_OPTIONS = ("abbreviations", "data-dir", "default-image-extension", "indented-code-classes",
-                       "preserve-tabs", "resource-path", "strip-comments", "tab-stop", "track-changes")
+                       "resource-path", "strip-comments", "tab-stop", "track-changes")
 # Whether a conversion is sandboxed, for what a filter reads through it; with
 # no options, that can't be told: sandboxed, failing closed.
 function _sandboxed(c::Conversion)
@@ -300,9 +300,12 @@ sandboxed when its options' `"sandbox"` is `true` or a directory sandbox
 (whose filters run in this process, outside it); it can't be told for a
 conversion with no options: pandocjl's (pandoc doesn't tell its filters
 about `--sandbox`, on the command line or in a defaults file), a script's
-run as a subprocess (made from its environment), one made by hand. Options
-given to `read` or `read_many` beside the conversion win over these
-(`sandbox = false` reads files again: the filter's author's choice).
+run as a subprocess (made from its environment), one made by hand. And
+the text is read as given, its tabs kept (`"preserve-tabs" => true`), as
+Lua's `pandoc.read` reads it: the `pandoc` command first replaces them by
+spaces. Options given to `read` or `read_many` beside the conversion win
+over these (`sandbox = false` reads files again, `preserve_tabs = false`
+expands tabs: the filter's author's choice).
 """
 function read_options(c::Conversion, format = nothing)
     opts = Dict{String, Any}()
@@ -320,6 +323,7 @@ function read_options(c::Conversion, format = nothing)
     end
     delete!(opts, "sandbox")
     _sandboxed(c) && (opts["sandbox"] = true)
+    opts["preserve-tabs"] = true
     given = something(c.options, Dict{String, Any}())
     opts["from"] = something(format, c.input_format, get(given, "from", nothing),
                              get(given, "reader", nothing), "markdown")

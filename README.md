@@ -99,6 +99,12 @@ cells(b::CodeBlock, ctx) = "cells" in b.attr.classes ?
     reduce(vcat, (d.blocks for d in Pandoc.read_many(split(b.text, '\n'), ctx.conversion))) : nothing
 ```
 
+Read so, a text keeps its tabs, as Lua's `pandoc.read` reads it; the
+`pandoc` command first replaces them by spaces (`preserve_tabs = false`
+does). A call each costs about 0.3 ms, six times `pandoc.read`'s: batch
+them. amsthm's 738 notes take 0.23 s read one by one and 0.012 s in one
+`read_many`.
+
 **Confined when the conversion is.** Document text read this way may name
 files (LaTeX's `\input`, RST's and Org's includes). When the conversion
 the filter runs in is sandboxed, by pandoc's sandbox (`sandbox = true`) or

@@ -217,7 +217,7 @@ end
     @test_logs (:warn, r"Could not load include file") match_mode = :any P.read_many(["\\input{nowhere-at-all}"], "latex")
     # as a conversion reads: its input format and reader options
     c = Conversion(; input_format = "commonmark", options = Dict{String, Any}("tab-stop" => 2))
-    @test P.read_options(c) == Dict("from" => "commonmark", "tab-stop" => 2)
+    @test P.read_options(c) == Dict("from" => "commonmark", "tab-stop" => 2, "preserve-tabs" => true)
     @test P.read("~~x~~", c).blocks[1].content[1] isa Str   # no strikeout in commonmark
 end
 
@@ -266,6 +266,19 @@ end
     @test P.convert("```parse\n*a*\n```"; to = "html", filters = [parse_blocks]) == "<p><em>a</em></p>\n"
     many(b::CodeBlock, ctx) = reduce(vcat, (d.blocks for d in P.read_many(split(b.text, '\n'), ctx.conversion)))
     @test P.convert("```\na\n*b*\n```"; to = "plain", filters = [many]) == "a\n\nb\n"
+end
+
+@testset "a filter's read keeps tabs, as pandoc.read" begin
+    # Lua's pandoc.read (pandoc 3.14: CodeBlock "x\ty"), not the pandoc
+    # command, which expands them first ("x   y")
+    c = Conversion(; input_format = "markdown", options = Dict{String, Any}())
+    code(d) = only(d.blocks).text
+    @test P.read_options(c)["preserve-tabs"] === true
+    @test code(P.read("    x\ty\n", c)) == "x\ty"
+    @test code(only(P.read_many(["    x\ty\n"], c))) == "x\ty"
+    @test code(P.read("    x\ty\n", c; preserve_tabs = false)) == "x   y"
+    # with no conversion: as the command
+    @test code(P.read("    x\ty\n")) == "x   y"
 end
 
 @testset "a filter's exception" begin

@@ -605,5 +605,6 @@ end
 end
 
 include("sandbox.jl")
+include("confined_reads.jl")
 
 end

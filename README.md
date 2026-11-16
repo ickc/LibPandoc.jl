@@ -95,6 +95,19 @@ cells(b::CodeBlock, ctx) = "cells" in b.attr.classes ?
     reduce(vcat, (d.blocks for d in Pandoc.read_many(split(b.text, '\n'), ctx.conversion))) : nothing
 ```
 
+**Confined when the conversion is.** Document text read this way may name
+files (LaTeX's `\input`, RST's and Org's includes). When the conversion
+the filter runs in is sandboxed, by pandoc's sandbox (`sandbox = true`) or
+a directory sandbox (`sandbox = (read = [...],)`, `LIBPANDOC_SANDBOX`), the
+fragments are read in pandoc's own sandbox: they read no files, not even in
+the directories listed (the filter runs in this process, outside them). So
+they are too when that can't be told: for a conversion with no options, as
+`pandocjl`'s filters get (pandoc doesn't tell them about `--sandbox`, on
+the command line or in a defaults file) and a script run as a subprocess
+makes from its environment (`Conversion(ARGS, ENV)`). A filter that wants
+the files read gives its own options, `read(text, ctx.conversion; sandbox
+= false)`: its code, its choice.
+
 It calls pandoc from its own task. A filter that waits for a conversion
 with Julia filters started in another task (`@async`, `Threads.@spawn`
 when it lands on the same thread) waits forever: pandoc returns to the
@@ -247,7 +260,8 @@ command line: they run in this process as they do without the sandbox,
 called back by the module, unconfined. Wasm filters run in this process
 too, seeing the same mounts. `pandocjl lua` and `pandoc server` are not in
 the module (status 4). A filter that reads fragments with
-`read(text, ctx.conversion)` reads them in pandoc's own sandbox: no files.
+`read(text, ctx.conversion)` or `read_many` reads them in pandoc's own
+sandbox: no files, not even in the directories listed ("Filters").
 `read_many` reads in this process: a directory sandbox there is an error.
 
 **Limits.** `$LIBPANDOC_WASM_TIMEOUT` (seconds) and

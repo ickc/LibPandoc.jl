@@ -64,6 +64,7 @@ function __init__()
     # what precompiling (its workload) left in these would be stale
     _SYMS[] = nothing
     _WASMTIME[] = nothing
+    _CLOCK[] = nothing   # (an image's clock thread is not this process's)
     _VERSION[] = nothing
     empty!(_SCRIPTS)
     empty!(_WASM_FILTERS)

@@ -34,8 +34,12 @@ Pkg.activate(@__DIR__; io = devnull)
 Pkg.instantiate()
 using PackageCompiler
 
-seconds = @elapsed create_sysimage(["LibPandoc", "Panir"]; sysimage_path = output, project,
-                                   precompile_execution_file = precompile_file, cpu_target)
+# no wasm limits while building: a timeout starts the clock thread, which
+# hangs writing the image
+seconds = withenv("LIBPANDOC_WASM_TIMEOUT" => nothing, "LIBPANDOC_WASM_MAX_MEMORY" => nothing) do
+    @elapsed create_sysimage(["LibPandoc", "Panir"]; sysimage_path = output, project,
+                             precompile_execution_file = precompile_file, cpu_target)
+end
 
 sha(file) = bytes2hex(open(SHA.sha256, file))
 commit(dir) = (c = readchomp(pipeline(ignorestatus(`git -C $dir describe --always --dirty`); stderr = devnull)); isempty(c) ? "not in git" : c)

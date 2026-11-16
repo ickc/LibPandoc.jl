@@ -542,6 +542,10 @@ end
                                    filters = [WasmFilter(wasm("calls"); timeout = 30)]))
         @test JSON.parse(out["blocks"][1]["c"][2])["error"][1] == "Timeout"
     end
+    # what a process's image holds of an earlier process (precompiling's, a
+    # system image's) is reset: the clock thread, which runs time limits, too
+    code = "import LibPandoc as P; P._CLOCK[] = UInt64(1); P.__init__(); print(P._CLOCK[] === nothing)"
+    @test Base.read(`$(Base.julia_cmd()) --startup-file=no --project=$PROJECT -e $code`, String) == "true"
     @test LibPandoc._parse_timeout("2") == 2.0 && LibPandoc._parse_timeout("0.5") == 0.5
     @test LibPandoc._parse_timeout("") === nothing && LibPandoc._parse_timeout("0") === nothing
     @test_throws ErrorException LibPandoc._parse_timeout("2s")

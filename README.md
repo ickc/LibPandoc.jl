@@ -28,6 +28,10 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
   keys, as keywords with `_` for `-` (`reference_doc = "ref.docx"`), or a
   `Dict`. `run` takes command-line arguments, parsed by pandoc itself.
   The output is a `String` for text formats and bytes for binary ones.
+  Input given as a string or bytes is read from a temporary file (as
+  libpandoc does), so RST's `include` and Org's `#+INCLUDE` with a
+  relative path find nothing, and `$sourcefile$` names that file: give
+  such documents as `input_files`.
 - **Errors** throw `PandocError`, with `kind` set to pandoc's error
   constructor (`"PandocParseError"`, ...), or `"Timeout"`. pandoc's
   **warnings** are logged with `@warn`, `read_many`'s readers' too.
@@ -175,7 +179,8 @@ LibPandoc.jl needs Julia 1.12 or later, and libpandoc 1.11 or a later
 `$LIBPANDOC_PATH` (the library), else `$LIBPANDOC_PREFIX` or
 `$CONDA_PREFIX` (a prefix with `lib/libpandoc.so`, `.dylib`, or
 `bin/pandoc.dll`), else libpandoc's release build, downloaded once into
-`~/.local/share/libpandoc` (`$LIBPANDOC_DOWNLOAD_DIR`), where
+`~/.local/share/libpandoc` (`$LIBPANDOC_DOWNLOAD_DIR`; from
+`$LIBPANDOC_DOWNLOAD_URL`, a URL or a file, for a mirror), where
 libpandoc-rs keeps it too. Linux (x86-64, aarch64), macOS (Intel, Apple
 silicon) and Windows (x86-64).
 

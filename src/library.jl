@@ -37,7 +37,8 @@ The libpandoc this package loads: the first of
   `.dylib`, or `bin/pandoc.dll`), as libpandoc-python and libpandoc-rs;
 - libpandoc's release build, downloaded once into `\$LIBPANDOC_DOWNLOAD_DIR`,
   else the user's data directory (`~/.local/share/libpandoc/$RELEASE/<target>`),
-  where libpandoc-rs keeps it too. The download is checked against the
+  where libpandoc-rs keeps it too (from `\$LIBPANDOC_DOWNLOAD_URL` if set: a
+  URL or a file, with `SHA256SUMS` beside it). The download is checked against the
   release's `SHA256SUMS`. It is not downloaded again: one too old for this
   package fails when it is loaded, saying to remove it.
 """

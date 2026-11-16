@@ -628,7 +628,9 @@ end
         t = @elapsed e = try WasmFilter(loop; timeout = 0.5)("{}", Conversion()); nothing catch e; e end
         @test e isa ErrorException && contains(e.msg, "its time limit") && t < 5
         @test ended()
-        # and so does the directory sandbox's
+        # and so does the directory sandbox's (timed with the module compiled)
+        P.convert("x"; sandbox = (read = String[], timeout = 0))
+        @test ended()
         t = @elapsed e = try P.convert(">"^100_000; sandbox = (read = String[], timeout = 0.5)) catch e; e end
         @test istimeout(e) && t < 10
         @test ended()

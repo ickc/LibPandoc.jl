@@ -822,7 +822,8 @@ else
 
     @testset "pandocjl: Julia filter scripts run here" begin
         # the user's code, as the command line is: in this process, unconfined
-        outside = named(joinpath(lab.outside, "input.md"))
+        # (the script runs on the host: the file by the host's name)
+        outside = joinpath(lab.outside, "input.md")
         Base.write(joinpath(lab.work, "upper.jl"), "using Panir\nrun_filter(s::Str -> Str(strip(read($(repr(outside)), String))))\n")
         status, out, err = pandocjl_in(lab, "-t", "plain", "-F", "upper.jl"; input = "x", env = HERE)
         @test (status, strip(out)) == (0, "INPUT-OK")

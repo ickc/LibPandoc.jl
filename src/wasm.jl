@@ -476,7 +476,7 @@ function _parse_memory(s::AbstractString)
     n == 0 ? nothing : Int(min(n, typemax(Int)))   # (more than an Int holds: none in practice)
 end
 
-const _CLOCK = Ref{Any}(nothing)   # the clock thread's handle, once started
+const _CLOCK = _Once{UInt64}()   # the clock thread's handle, once started
 
 # The clock thread's loop: sleep (letting the GC run meanwhile), then advance
 # the epoch by the time that has passed, in _TICKs. By the time passed, not
@@ -517,7 +517,7 @@ struct _Wasmtime
     linker::Ptr{Cvoid}
 end
 
-const _WASMTIME = Ref{Union{Nothing, _Wasmtime}}(nothing)
+const _WASMTIME = _Once{_Wasmtime}()
 const _WASMTIME_LOCK = ReentrantLock()
 
 function _wasmtime()

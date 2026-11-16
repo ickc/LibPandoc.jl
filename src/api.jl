@@ -57,7 +57,7 @@ One of libpandoc's queries (`libpandoc.h`), its answer as parsed JSON:
 query(name::AbstractString; params...) =
     JSON.parse(String(_query(_json(Dict{String, Any}("query" => name, (String(k) => v for (k, v) in params)...)))))
 
-const _VERSION = Ref{Union{Nothing, String}}(nothing)
+const _VERSION = _Once{String}()
 
 # as pandoc writes it ("3.12"), for PANDOC_VERSION
 function _version_string()

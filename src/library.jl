@@ -116,6 +116,17 @@ function _check_sum(url, file)
     nothing
 end
 
+# A value made once, under a lock, and read without one: atomically, so that
+# a thread reading it while another stores it sees all of it or nothing (a
+# plain read then is a data race, which may see half of it: the first calls
+# from several threads at once).
+mutable struct _Once{T}
+    @atomic value::Union{Nothing, T}
+end
+_Once{T}() where {T} = _Once{T}(nothing)
+Base.getindex(o::_Once) = @atomic :acquire o.value
+Base.setindex!(o::_Once, v) = (@atomic :release o.value = v; v)
+
 # The library's C functions, found once.
 struct _Syms
     init::Ptr{Cvoid}
@@ -132,7 +143,7 @@ struct _Syms
     buffer_set::Ptr{Cvoid}
 end
 
-const _SYMS = Ref{Union{Nothing, _Syms}}(nothing)
+const _SYMS = _Once{_Syms}()
 const _LOAD_LOCK = ReentrantLock()
 
 # The ABI version this package relies on (libpandoc.h): a library with the

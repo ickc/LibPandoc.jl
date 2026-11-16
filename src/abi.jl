@@ -4,8 +4,18 @@
     PandocError(kind, message)
 
 A pandoc failure. `kind` is pandoc's error constructor, e.g.
-`"PandocParseError"` or `"PandocUnknownReaderError"`; `message` is what the
-pandoc command would print.
+`"PandocParseError"` or `"PandocUnknownReaderError"`, `"Timeout"` for a
+call stopped by its time limit (the option `timeout`), or `"Exception"`;
+`message` is what the pandoc command would print.
+
+```julia
+try
+    Pandoc.convert(text; timeout = 5)
+catch e
+    e isa PandocError && e.kind == "Timeout" || rethrow()
+    ...
+end
+```
 """
 struct PandocError <: Exception
     kind::String
@@ -23,12 +33,15 @@ struct _Result
     log::Ptr{UInt8}
 end
 
+# (a pandoc_result's strings: NUL-terminated, valid until it is freed)
 _str(p::Ptr{UInt8}) = p == C_NULL ? "" : unsafe_string(p)
 
 # A pandoc_result's parts (it is freed): status, output, error kind and
 # message, log.
 function _parts(p::Ptr{_Result})
     p == C_NULL && throw(OutOfMemoryError())
+    # (p: libpandoc's, not NULL, laid out as _Result; its output is
+    # output_len bytes, copied before it is freed below)
     r = unsafe_load(p)
     out = r.status == 0 ? copy(unsafe_wrap(Vector{UInt8}, r.output, r.output_len)) : UInt8[]
     kind, msg, log = _str(r.error_kind), _str(r.error_message), _str(r.log)
@@ -119,6 +132,8 @@ _Callback(run) = _Callback(run, nothing)
 
 function _callback_entry(ud::Ptr{Cvoid}, doc::Ptr{UInt8}, doc_len::Csize_t,
                          ctx::Ptr{UInt8}, ctx_len::Csize_t, out::Ptr{Cvoid})::Cint
+    # (ud: a _Callback _with_callbacks keeps alive for the call; doc and
+    # ctx: libpandoc's, valid during this callback, copied here)
     cb = unsafe_pointer_to_objref(ud)::_Callback
     try
         d = unsafe_string(doc, doc_len)
@@ -131,10 +146,18 @@ function _callback_entry(ud::Ptr{Cvoid}, doc::Ptr{UInt8}, doc_len::Csize_t,
         return Cint(0)
     catch e
         cb.error = (e, catch_backtrace())
-        msg = sprint(showerror, e)
+        msg = _message(e)
         ccall(_load().buffer_set, Cvoid, (Ptr{Cvoid}, Ptr{UInt8}, Csize_t), out, msg, sizeof(msg))
         return Cint(1)
     end
+end
+
+# An exception's message, for C: whatever its `showerror` does (it may
+# throw itself), nothing unwinds into the caller's frames.
+_message(e) = try
+    sprint(showerror, e)
+catch
+    try "$(typeof(e)) (its showerror failed)" catch; "an exception" end
 end
 
 struct _Filter
@@ -169,15 +192,19 @@ function _with_callbacks(f, cbs::Vector{_Callback})
         GC.@preserve cbs fs _pinned(() -> f(fs))
     catch e
         for cb in cbs
-            cb.error === nothing || throw(FilterError(cb.error...))
+            cb.error === nothing || throw(_filter_error(cb.error...))
         end
         rethrow()
     end
     for cb in cbs
-        cb.error === nothing || throw(FilterError(cb.error...))
+        cb.error === nothing || throw(_filter_error(cb.error...))
     end
     r
 end
+
+# What a filter threw, as the call throws it: a FilterError, but a time
+# limit's PandocError as it is (a script stopped as pandoc stops a JSON filter).
+_filter_error(e, bt) = e isa PandocError && e.kind == "Timeout" ? e : FilterError(e, bt)
 
 # -- the calls -------------------------------------------------------------------------
 
@@ -195,11 +222,19 @@ function _convert(options::AbstractString, input, cbs::Vector{_Callback} = _Call
     end
 end
 
+# Arguments for C, NUL-terminated (as Julia's strings are underneath): one
+# with a NUL in it would end there, so it is refused.
+function _argv(args)
+    argv = String[a for a in args]
+    any(a -> occursin('\0', a), argv) && throw(ArgumentError("an argument with a NUL in it: $(repr(first(filter(a -> occursin('\0', a), argv))))"))
+    argv
+end
+
 function _convert_args(args::AbstractVector{<:AbstractString}, input)
     s = _load()
     inp = _bytes(input)
     inptr, inlen = inp === nothing ? (C_NULL, 0) : (pointer(inp), length(inp))
-    argv = String.(args)
+    argv = _argv(args)
     ptrs = map(pointer, argv)
     GC.@preserve argv ptrs inp _take(
         @ccall gc_safe = true $(s.convert_args)(length(argv)::Cint, ptrs::Ptr{Ptr{UInt8}},
@@ -218,6 +253,7 @@ end
 
 # pandoc_main: the exit status.
 function _pandoc_main(argv::Vector{String}, filters_json::Union{Nothing, String}, cbs::Vector{_Callback})
+    argv = _argv(argv)
     s = _load()
     fj = filters_json === nothing ? C_NULL : pointer(filters_json)
     fjlen = filters_json === nothing ? 0 : sizeof(filters_json)

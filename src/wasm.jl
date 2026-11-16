@@ -3,7 +3,8 @@
 #
 # A wasm filter is a pandoc JSON filter built for WASI (`wasm32-wasip1`):
 # the document on stdin, the new one on stdout, the output format as its
-# first argument, pandoc's variables in its environment. It runs sandboxed:
+# first argument, the variables libpandoc gives JSON filters in its
+# environment (PANDOC_WRITER_OPTIONS among them). It runs sandboxed:
 # it sees only the directories it is given (the current one, read-only, by
 # default), no network. It may call pandoc through the imports of module
 # `libpandoc` (libpandoc-rs's `guest.rs`), which this host answers on this
@@ -11,8 +12,9 @@
 # sandbox only, and no options that read or write files, fetch or run anything
 # (its list, which every host shares).
 #
-# Limits, which pandoc has for no filter: a timeout (wall-clock, pandoc's calls
-# included) and a memory limit (the filter's own memory), from
+# Limits, which pandoc has for no filter: a timeout (wall-clock, its calls to
+# pandoc included: each runs with the time the filter has left as its
+# "timeout") and a memory limit (the filter's own memory), from
 # $LIBPANDOC_WASM_TIMEOUT (seconds, as pandoc-server's --timeout) and
 # $LIBPANDOC_WASM_MAX_MEMORY (bytes, or with k, m or g, as pandoc's +RTS -M),
 # or per filter; none by default, as pandoc.
@@ -35,7 +37,7 @@ const _EXTERN_MEMORY = 0x03
 const _WASM_I32 = 0x00
 
 function _vec_string(v::Ref{_Vec})
-    s = v[].size == 0 ? "" : unsafe_string(v[].data, v[].size)
+    s = v[].size == 0 ? "" : unsafe_string(v[].data, v[].size)   # (wasmtime's vector, copied, then deleted)
     @ccall libwasmtime.wasm_byte_vec_delete(v::Ptr{_Vec})::Cvoid
     rstrip(s, '\0')
 end
@@ -75,7 +77,11 @@ It may call pandoc (libpandoc-rs's `libpandoc` crate built for wasm): in
 pandoc's sandbox, with options that name no files.
 
 It fails when it runs longer than `timeout` seconds (its calls to pandoc
-included) or its memory would grow past `max_memory` bytes: `nothing` for
+included: each runs with the time the filter has left as its `"timeout"`,
+and one made after that fails at once) or its memory would grow past
+`max_memory` bytes, or its output (standard output, which this process
+keeps, and standard error, passed on to this process's) would: `nothing`
+or 0 for
 no limit, `missing` (the default) for what `\$LIBPANDOC_WASM_TIMEOUT` and
 `\$LIBPANDOC_WASM_MAX_MEMORY` say when it runs (seconds; bytes, or with `k`,
 `m` or `g`), none if unset.
@@ -93,6 +99,7 @@ mutable struct WasmFilter
     function WasmFilter(path::AbstractString; dirs = ["." => "."], writable::Bool = false,
                         timeout::Union{Nothing, Missing, Real} = missing,
                         max_memory::Union{Nothing, Missing, Integer} = missing)
+        _limit("timeout", timeout), _limit("max_memory", max_memory)   # before compiling it
         w = _wasmtime()
         bytes = Base.read(path)
         mod = Ref{Ptr{Cvoid}}(C_NULL)
@@ -101,7 +108,7 @@ mutable struct WasmFilter
         _check(err, "$path: not a wasm filter")
         _version_string()  # now, not from inside a conversion
         f = new(String(path), mod[], Pair{String, String}[String(h) => String(g) for (h, g) in dirs], writable,
-                timeout isa Real ? Float64(timeout) : timeout, max_memory isa Integer ? Int(max_memory) : max_memory)
+                _limit("timeout", timeout), _limit("max_memory", max_memory))
         finalizer(f) do f
             @ccall libwasmtime.wasmtime_module_delete(f.mod::Ptr{Cvoid})::Cvoid
         end
@@ -110,25 +117,65 @@ end
 
 Base.show(io::IO, f::WasmFilter) = print(io, "WasmFilter(", repr(f.name), ")")
 
-# A run's state, the store's data: the filter's stdout, and the result of
-# its last call to pandoc.
+# A run's state, the store's data: the filter's stdout, the result of its
+# last call to pandoc, its deadline (`_now()`'s; nothing for none), whether
+# its time ran out in a call to pandoc, and its output (standard output and
+# error) so far, what it may write (its memory limit), and the stream that
+# went past that.
 mutable struct _WasmRun
     stdout::IOBuffer
     result::Any   # nothing, (output, log) or a PandocError
+    deadline::Union{Nothing, Float64}
+    out_of_time::Bool
+    written::Int
+    max_output::Int
+    over::Union{Nothing, String}
 end
+_WasmRun(max_output = typemax(Int)) = _WasmRun(IOBuffer(), nothing, nothing, false, 0, max_output, nothing)
 
-function _stdout_write(data::Ptr{Cvoid}, buf::Ptr{UInt8}, len::Csize_t)::Cssize_t
-    run = unsafe_pointer_to_objref(data)::_WasmRun
-    unsafe_write(run.stdout, buf, len)
-    Cssize_t(len)
+# Seconds, monotonic.
+_now() = time_ns() / 1e9
+
+# A write of the filter's to its standard output (kept) or error (passed on
+# to this process's, without yielding: a task switch inside wasmtime's call
+# is not safe), counted against its memory limit: past it the write fails
+# (ENOSPC), and so does the filter. Nothing may unwind through wasmtime's frames.
+function _output(data::Ptr{Cvoid}, buf::Ptr{UInt8}, len::Csize_t, stream::String)::Cssize_t
+    try
+        run = unsafe_pointer_to_objref(data)::_WasmRun   # (alive: the store's data, preserved)
+        if len > run.max_output - run.written
+            run.over = stream
+            return Cssize_t(-28)
+        end
+        run.written += Int(len)
+        # (buf, len: wasmtime's, valid for this call)
+        stream == "standard output" ? unsafe_write(run.stdout, buf, len) : unsafe_write(Core.stderr, buf, len)
+        Cssize_t(len)
+    catch
+        Cssize_t(-28)
+    end
 end
+_stdout_write(data::Ptr{Cvoid}, buf::Ptr{UInt8}, len::Csize_t) = _output(data, buf, len, "standard output")
+_stderr_write(data::Ptr{Cvoid}, buf::Ptr{UInt8}, len::Csize_t) = _output(data, buf, len, "standard error")
 
-"The environment pandoc gives a JSON filter, as libpandoc does."
+"""
+The environment variables a JSON filter run by libpandoc gets: pandoc's
+(`PANDOC_VERSION`, `PANDOC_READER_OPTIONS`) and libpandoc's (the formats
+with extensions, `PANDOC_WRITER_OPTIONS`: without `variables` if it would
+be longer than 32,000 bytes, an environment variable's limit on Windows,
+as libpandoc does).
+"""
 function _filter_env(c::Conversion)
     env = ["PANDOC_VERSION" => _version_string(),
            "PANDOC_READER_OPTIONS" => JSON.json(something(c.reader_options, Dict()))]
     c.input_format === nothing || push!(env, "PANDOC_INPUT_FORMAT" => c.input_format)
     c.output_format === nothing || push!(env, "PANDOC_OUTPUT_FORMAT" => c.output_format)
+    w = c.writer_options
+    if w !== nothing
+        text = JSON.json(w)
+        sizeof(text) > 32_000 && (text = JSON.json(Dict(k => v for (k, v) in w if k != "variables")))
+        push!(env, "PANDOC_WRITER_OPTIONS" => text)
+    end
     env
 end
 
@@ -142,24 +189,30 @@ function (f::WasmFilter)(json::Union{AbstractString, AbstractVector{UInt8}}, c::
     timeout = f.timeout === missing ? _parse_timeout(get(ENV, TIMEOUT_VAR, "")) : f.timeout
     max_memory = f.max_memory === missing ? _parse_memory(get(ENV, MAX_MEMORY_VAR, "")) : f.max_memory
     timeout === nothing || _ticking(w)
+    # the epoch's ticks: a huge limit is none in practice
+    ticks = timeout === nothing ? _NO_DEADLINE : min(_NO_DEADLINE, ceil(timeout / _TICK) + 1)
     doc = _bytes(json)
-    run = _WasmRun(IOBuffer(), nothing)
-    wasi = @ccall libwasmtime.wasi_config_new()::Ptr{Cvoid}
+    run = _WasmRun(something(max_memory, typemax(Int)))
     argv = [f.name, something(c.format, "")]
     env = _filter_env(c)
     names, values = first.(env), last.(env)
-    GC.@preserve argv names values begin
+    wasi = @ccall libwasmtime.wasi_config_new()::Ptr{Cvoid}
+    ok = GC.@preserve argv names values begin
         a, n, v = map(pointer, argv), map(pointer, names), map(pointer, values)
-        @ccall libwasmtime.wasi_config_set_argv(wasi::Ptr{Cvoid}, length(a)::Csize_t, a::Ptr{Ptr{UInt8}})::Bool
-        @ccall libwasmtime.wasi_config_set_env(wasi::Ptr{Cvoid}, length(n)::Csize_t, n::Ptr{Ptr{UInt8}}, v::Ptr{Ptr{UInt8}})::Bool
+        (@ccall libwasmtime.wasi_config_set_argv(wasi::Ptr{Cvoid}, length(a)::Csize_t, a::Ptr{Ptr{UInt8}})::Bool) &&
+        (@ccall libwasmtime.wasi_config_set_env(wasi::Ptr{Cvoid}, length(n)::Csize_t, n::Ptr{Ptr{UInt8}}, v::Ptr{Ptr{UInt8}})::Bool)
     end
+    # (wasmtime takes them as text)
+    ok || (@ccall libwasmtime.wasi_config_delete(wasi::Ptr{Cvoid})::Cvoid; error("$(f.name): its arguments or environment aren't UTF-8"))
     stdin = Ref(_Vec(0, C_NULL))
     GC.@preserve doc @ccall libwasmtime.wasm_byte_vec_new(stdin::Ptr{_Vec}, length(doc)::Csize_t, doc::Ptr{UInt8})::Cvoid
     @ccall libwasmtime.wasi_config_set_stdin_bytes(wasi::Ptr{Cvoid}, stdin::Ptr{_Vec})::Cvoid
     write_cb = @cfunction(_stdout_write, Cssize_t, (Ptr{Cvoid}, Ptr{UInt8}, Csize_t))
     @ccall libwasmtime.wasi_config_set_stdout_custom(wasi::Ptr{Cvoid}, write_cb::Ptr{Cvoid},
                                                      pointer_from_objref(run)::Ptr{Cvoid}, C_NULL::Ptr{Cvoid})::Cvoid
-    @ccall libwasmtime.wasi_config_inherit_stderr(wasi::Ptr{Cvoid})::Cvoid
+    err_cb = @cfunction(_stderr_write, Cssize_t, (Ptr{Cvoid}, Ptr{UInt8}, Csize_t))
+    @ccall libwasmtime.wasi_config_set_stderr_custom(wasi::Ptr{Cvoid}, err_cb::Ptr{Cvoid},
+                                                     pointer_from_objref(run)::Ptr{Cvoid}, C_NULL::Ptr{Cvoid})::Cvoid
     perms = f.writable ? 3 : 1
     for (host, guest) in f.dirs
         ok = @ccall libwasmtime.wasi_config_preopen_dir(wasi::Ptr{Cvoid}, host::Cstring, guest::Cstring,
@@ -173,12 +226,12 @@ function (f::WasmFilter)(json::Union{AbstractString, AbstractVector{UInt8}}, c::
             ctx = @ccall libwasmtime.wasmtime_store_context(store::Ptr{Cvoid})::Ptr{Cvoid}
             @ccall libwasmtime.wasmtime_store_limiter(store::Ptr{Cvoid}, something(max_memory, -1)::Int64,
                                                       (-1)::Int64, (-1)::Int64, (-1)::Int64, (-1)::Int64)::Cvoid
-            ticks = timeout === nothing ? typemax(UInt64) ÷ 2 : UInt64(ceil(timeout / _TICK)) + 1
-            @ccall libwasmtime.wasmtime_context_set_epoch_deadline(ctx::Ptr{Cvoid}, ticks::UInt64)::Cvoid
-            started = time()
+            @ccall libwasmtime.wasmtime_context_set_epoch_deadline(ctx::Ptr{Cvoid}, UInt64(ticks)::UInt64)::Cvoid
+            started = _now()
+            timeout === nothing || (run.deadline = started + timeout)
             # a failure, with the limit it may have met
             function failed(msg; interrupted = false)
-                interrupted && error("$(f.name): stopped after $(round(time() - started; digits = 1)) s, " *
+                interrupted && error("$(f.name): stopped after $(round(_now() - started; digits = 1)) s, " *
                                      "its time limit ($TIMEOUT_VAR: $timeout)")
                 max_memory === nothing && error(msg)
                 error("$msg (its memory limit: $max_memory bytes, $MAX_MEMORY_VAR)")
@@ -197,18 +250,25 @@ function (f::WasmFilter)(json::Union{AbstractString, AbstractVector{UInt8}}, c::
             func = Ref(ext[].of[1:2])
             err = @ccall gc_safe = true libwasmtime.wasmtime_func_call(ctx::Ptr{Cvoid}, func::Ptr{NTuple{2, UInt64}},
                 C_NULL::Ptr{Cvoid}, 0::Csize_t, C_NULL::Ptr{Cvoid}, 0::Csize_t, trap::Ptr{Ptr{Cvoid}})::Ptr{Cvoid}
+            msg, interrupted = nothing, false
             if err != C_NULL
                 status = Ref{Cint}(0)
                 exited = @ccall libwasmtime.wasmtime_error_exit_status(err::Ptr{Cvoid}, status::Ptr{Cint})::Bool
-                msg = exited ? "$(f.name) exited with status $(status[])" : "$(f.name): $(_error_message(err))"
+                msg = exited ? (status[] == 0 ? nothing : "$(f.name) exited with status $(status[])") :
+                      "$(f.name): $(_error_message(err))"
                 _error_delete(err)
-                exited && status[] == 0 || failed(msg)
             end
             if trap[] != C_NULL
                 code = Ref{UInt8}(0xff)
                 @ccall libwasmtime.wasmtime_trap_code(trap[]::Ptr{Cvoid}, code::Ptr{UInt8})::Bool
-                failed("$(f.name): $(_trap_message(trap[]))"; interrupted = timeout !== nothing && code[] == _TRAP_INTERRUPT)
+                interrupted = timeout !== nothing && code[] == _TRAP_INTERRUPT
+                msg = "$(f.name): $(_trap_message(trap[]))"   # (which deletes the trap)
             end
+            # its time ran out in a call to pandoc: stopped, whatever it did after
+            run.out_of_time && failed(""; interrupted = true)
+            # its output went past its limit (whether it noticed the failed write or not)
+            run.over === nothing || failed("$(f.name): its $(run.over) went past its memory limit")
+            msg === nothing || failed(msg; interrupted)
         end
     finally
         @ccall libwasmtime.wasmtime_store_delete(store::Ptr{Cvoid})::Cvoid
@@ -218,10 +278,14 @@ end
 
 # -- the libpandoc imports -------------------------------------------------------------
 
+# (the store's data: the _WasmRun the run keeps alive, GC.@preserve)
 _run(caller) = unsafe_pointer_to_objref(@ccall libwasmtime.wasmtime_context_get_data(
     (@ccall libwasmtime.wasmtime_caller_context(caller::Ptr{Cvoid})::Ptr{Cvoid})::Ptr{Cvoid})::Ptr{Cvoid})::_WasmRun
 
-_arg(args::Ptr{UInt64}, i) = unsafe_load(Ptr{Int32}(args + 16 * (i - 1)))  # wasmtime_val_raw_t: 16 bytes
+# A host function's arguments and result: wasmtime's array of
+# wasmtime_val_raw_t (16 bytes each), as long as the function type says
+# (the linker checked the filter's import against it), valid during the call.
+_arg(args::Ptr{UInt64}, i) = unsafe_load(Ptr{Int32}(args + 16 * (i - 1)))
 _ret!(args::Ptr{UInt64}, v) = unsafe_store!(Ptr{Int32}(args), Int32(v))
 
 # The filter's memory: its address and size, now (it may grow when the filter runs).
@@ -240,7 +304,7 @@ function _guest_bytes(caller, ptr::Int32, len::Int32)
     data, size = _memory(caller)
     p, n = reinterpret(UInt32, ptr), reinterpret(UInt32, len)
     UInt64(p) + n <= size || error("out of bounds memory access")
-    copy(unsafe_wrap(Vector{UInt8}, data + p, n))
+    copy(unsafe_wrap(Vector{UInt8}, data + p, n))   # (checked within the memory just above; copied)
 end
 
 # A host function's body: a trap for what it throws (nothing may unwind
@@ -250,12 +314,13 @@ function _host(f, caller)
         f()
         C_NULL
     catch e
-        msg = sprint(showerror, e)
-        @ccall libwasmtime.wasmtime_trap_new(msg::Cstring, sizeof(msg)::Csize_t)::Ptr{Cvoid}
+        msg = _message(e)
+        @ccall libwasmtime.wasmtime_trap_new(msg::Ptr{UInt8}, sizeof(msg)::Csize_t)::Ptr{Cvoid}
     end
 end
 
-# A call's answer, kept for result_len and result_read; the status.
+# A call's answer, kept for result_len and result_read; the status. A call
+# that ends past the filter's deadline ends the filter.
 function _answer!(run::_WasmRun, f)
     run.result = try
         f()
@@ -263,7 +328,26 @@ function _answer!(run::_WasmRun, f)
         e isa PandocError || rethrow()
         e
     end
+    run.deadline === nothing || _now() < run.deadline || (run.out_of_time = true)
     Int32(run.result isa PandocError)
+end
+
+# The seconds the filter has left (nothing: no limit); a call made with none
+# left fails at once, as a "Timeout".
+function _time_left(run::_WasmRun)
+    run.deadline === nothing && return nothing
+    left = run.deadline - _now()
+    left > 0 && return left
+    run.out_of_time = true
+    throw(PandocError("Timeout", "the filter's time limit is reached"))
+end
+
+# Options a filter gives pandoc, within its time: their "timeout" the time
+# it has left, or its own if shorter.
+function _within(opts::Dict{String, Any}, left)
+    own = get(opts, "timeout", nothing)
+    left === nothing || own isa Real && !(own isa Bool) && 0 < own < left || (opts["timeout"] = left)
+    opts
 end
 
 _guest_json(caller, p, l) = try
@@ -279,7 +363,8 @@ function _import_convert(env::Ptr{Cvoid}, caller::Ptr{Cvoid}, args::Ptr{UInt64},
         run = _run(caller)
         input = has != 0 ? _guest_bytes(caller, i, il) : nothing
         _ret!(args, _answer!(run, () -> begin
-            opts = _untrusted(_guest_json(caller, o, ol))
+            left = _time_left(run)
+            opts = _within(_untrusted(_guest_json(caller, o, ol)), left)
             input === nothing && throw(PandocError("PandocOptionError", "a wasm filter gives convert its input"))
             _call_raw(:convert, JSON.json(opts), input)
         end))
@@ -291,10 +376,11 @@ function _import_read_many(env::Ptr{Cvoid}, caller::Ptr{Cvoid}, args::Ptr{UInt64
         p, l = _arg(args, 1), _arg(args, 2)
         run = _run(caller)
         _ret!(args, _answer!(run, () -> begin
+            left = _time_left(run)
             req = _guest_json(caller, p, l)
             req isa AbstractDict || _refuse("a request that isn't an object")
             req = Dict{String, Any}(req)
-            req["options"] = _untrusted(get(req, "options", Dict{String, Any}()))
+            req["options"] = _within(_untrusted(get(req, "options", Dict{String, Any}())), left)
             _call_raw(:read_many, JSON.json(req))
         end))
     end
@@ -305,6 +391,7 @@ function _import_query(env::Ptr{Cvoid}, caller::Ptr{Cvoid}, args::Ptr{UInt64}, n
         p, l = _arg(args, 1), _arg(args, 2)
         run = _run(caller)
         _ret!(args, _answer!(run, () -> begin
+            _time_left(run)
             _call_raw(:query, JSON.json(_untrusted(_guest_json(caller, p, l))))
         end))
     end
@@ -335,19 +422,17 @@ function _import_result_read(env::Ptr{Cvoid}, caller::Ptr{Cvoid}, args::Ptr{UInt
         data, size = _memory(caller)
         to = reinterpret(UInt32, _arg(args, 2))
         UInt64(to) + length(b) <= size || error("out of bounds memory access")
-        GC.@preserve b unsafe_copyto!(data + to, pointer(b), length(b))
+        GC.@preserve b unsafe_copyto!(data + to, pointer(b), length(b))   # (checked just above)
     end
 end
 
 # -- what a wasm filter may ask of pandoc ----------------------------------------------
 
 # What a filter gives pandoc (options, or a query), marked `"untrusted": true`
-# for libpandoc (1.7) to check: it accepts only what reads and writes no files,
+# for libpandoc to check: it accepts only what reads and writes no files,
 # fetches nothing and runs nothing, and turns pandoc's sandbox on. The list is
 # libpandoc's, the same for every host.
 function _untrusted(x)
-    v = ccall(_load().abi_version, Cint, ())
-    v >= 1007 || _refuse("a call from a wasm filter needs libpandoc 1.7 (\"untrusted\"), not $(v ÷ 1000).$(v % 1000)")
     x isa AbstractDict || _refuse("options that aren't an object")
     o = Dict{String, Any}(x)
     o["untrusted"] = true
@@ -363,6 +448,18 @@ const MAX_MEMORY_VAR = "LIBPANDOC_WASM_MAX_MEMORY"
 
 "How often the engine's epoch advances, once a filter has a timeout (seconds)."
 const _TICK = 0.01
+const _NO_DEADLINE = typemax(UInt64) ÷ 2   # ticks: never, in practice
+
+# A limit given to WasmFilter: `nothing` (none: 0 too, as the variables) or
+# `missing` as they are; negative, NaN or infinite refused; a size past
+# what an Int holds: as large as it does (none in practice).
+function _limit(name, x)
+    (x === nothing || x === missing) && return x
+    x isa Real && !(x isa Bool) && isfinite(x) && x >= 0 ||
+        throw(ArgumentError("$name: 0 or more (0: no limit), not $(repr(x))"))
+    x == 0 && return nothing
+    name == "timeout" ? Float64(x) : Int(min(x, typemax(Int)))
+end
 
 "A timeout in seconds (\$LIBPANDOC_WASM_TIMEOUT): `nothing` if empty or 0."
 function _parse_timeout(s::AbstractString)
@@ -379,11 +476,11 @@ function _parse_memory(s::AbstractString)
     isempty(s) && return nothing
     m = match(r"^([0-9]+)([kKmMgG]?)$", s)
     m === nothing && error("$MAX_MEMORY_VAR: bytes, or with k, m or g, not $(repr(s))")
-    n = parse(Int, m[1]) << Dict("" => 0, "k" => 10, "m" => 20, "g" => 30)[lowercase(m[2])]
-    n == 0 ? nothing : n
+    n = parse(BigInt, m[1]) << Dict("" => 0, "k" => 10, "m" => 20, "g" => 30)[lowercase(m[2])]
+    n == 0 ? nothing : Int(min(n, typemax(Int)))   # (more than an Int holds: none in practice)
 end
 
-const _CLOCK = Ref{Any}(nothing)   # the clock thread's handle, once started
+const _CLOCK = _Once{UInt64}()   # the clock thread's handle, once started
 
 # The clock thread's loop: sleep (letting the GC run meanwhile), then advance
 # the epoch by the time that has passed, in _TICKs. By the time passed, not
@@ -424,7 +521,7 @@ struct _Wasmtime
     linker::Ptr{Cvoid}
 end
 
-const _WASMTIME = Ref{Union{Nothing, _Wasmtime}}(nothing)
+const _WASMTIME = _Once{_Wasmtime}()
 const _WASMTIME_LOCK = ReentrantLock()
 
 function _wasmtime()

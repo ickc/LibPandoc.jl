@@ -26,18 +26,41 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
 
 - **Options** are pandoc's [defaults-file](https://pandoc.org/MANUAL.html#defaults-files)
   keys, as keywords with `_` for `-` (`reference_doc = "ref.docx"`), or a
-  `Dict`. `run` takes command-line arguments, parsed by pandoc itself.
-  The output is a `String` for text formats and bytes for binary ones.
+  `Dict` (a keyword wins over the same key in it). `read`'s, `write`'s and
+  `read_many`'s format is an argument or the option (`from`/`reader`,
+  `to`/`writer`), not both; an option a function has no use for (`read`'s
+  `to`, `write`'s `from`, `read_many`'s `filters`, ...) is an
+  `ArgumentError`, as is a conversion with neither input nor `input_files`
+  (pandoc would read this process's standard input and close it: pass
+  `read(stdin)`). `run` takes command-line arguments, parsed by pandoc
+  itself. The output is a `String` for text formats and bytes for binary ones.
+  Input given as a string or bytes is read from a temporary file (as
+  libpandoc does), so RST's `include` and Org's `#+INCLUDE` with a
+  relative path find nothing, and `$sourcefile$` names that file: give
+  such documents as `input_files`.
 - **Errors** throw `PandocError`, with `kind` set to pandoc's error
-  constructor (`"PandocParseError"`, ...). pandoc's **warnings** are logged
-  with `@warn`.
+  constructor (`"PandocParseError"`, ...), or `"Timeout"`. pandoc's
+  **warnings** are logged with `@warn`, `read_many`'s readers' too.
+- **Time limit:** `timeout = seconds` (libpandoc's option, for `convert`,
+  `read`, `write`, `read_many`) stops a call still running after that
+  long, a `PandocError` of kind `"Timeout"`; the process goes on. It stops
+  pandoc's own code, JSON filters and Julia scripts run as a subprocess,
+  not code in this process (a Julia
+  filter runs to its end, and the call fails when it returns) nor Lua
+  filters. `read_many`'s limit is the whole call's: a text not read by then
+  fails on its own (`return_exceptions = true` keeps the others'
+  documents). No memory limit: for documents from someone you don't trust,
+  a process of their own, a `timeout`, and `sandbox` or `untrusted`.
 - **Threads:** conversions from different tasks and threads run in
   parallel, on pandoc's own threads: one per logical core, or
-  `$LIBPANDOC_NUM_THREADS`; `num_threads()` and `set_num_threads(n)`.
-- **Untrusted input:** `untrusted = true` accepts only options that read
+  `$LIBPANDOC_NUM_THREADS`; `num_threads()`. `set_num_threads(n)` sets the
+  number only before pandoc first runs something in parallel (it grows to
+  it then, once), and returns the number in effect.
+- **Untrusted options:** `untrusted = true` accepts only options that read
   no files, write none, fetch nothing and run nothing, with pandoc's
   sandbox on (libpandoc's list; anything else throws a `PandocError`
-  naming it): for documents or options from someone you don't trust.
+  naming it): for options from code you don't trust. It bounds neither
+  time nor memory (above).
 - **Queries:** `pandoc_version()`, `api_version()`, `input_formats()`,
   `output_formats()`, `extensions(format)`, `default_template(format)`,
   `query(name; params...)`.
@@ -51,12 +74,16 @@ reader keeps in memory, such as a docx's images, reaches the writer):
   `Panir.walk!` walks: return `nothing` to keep a node, a node to replace
   it, a vector to splice in. A method may take the context too,
   `f(x, ctx)`: `ctx.conversion` says how pandoc reads and writes (input and
-  output formats with extensions, reader options, the options). The order
+  output formats with extensions, the reader's and the writer's options,
+  `writer_options` being Lua's `PANDOC_WRITER_OPTIONS`: `-N`,
+  `--top-level-division`, ...; and the options). The order
   is pandoc's Lua filters' by default; `f => :topdown` or `f => :bottomup`
   for another. Consecutive Julia filters share one parse of the document.
 - `RawFilter(f)`: `f(json, conversion)` on pandoc's JSON as it is.
 - **Julia filter scripts** (`"foo.jl"`), in this process (below).
 - **Wasm filters** (`"foo.wasm"`, or `WasmFilter(path)`), in this process.
+  They, and scripts run as a subprocess, get the variables libpandoc gives
+  JSON filters (`PANDOC_WRITER_OPTIONS` among them).
 - pandoc's own: Lua filters, JSON filters (programs), `"citeproc"`.
 
 A filter may call pandoc. `Pandoc.read(text, ctx.conversion)` parses a
@@ -67,6 +94,12 @@ once, in parallel (as pantable parses table cells):
 cells(b::CodeBlock, ctx) = "cells" in b.attr.classes ?
     reduce(vcat, (d.blocks for d in Pandoc.read_many(split(b.text, '\n'), ctx.conversion))) : nothing
 ```
+
+It calls pandoc from its own task. A filter that waits for a conversion
+with Julia filters started in another task (`@async`, `Threads.@spawn`
+when it lands on the same thread) waits forever: pandoc returns to the
+thread that called it, so the conversion started inside the filter waits
+for the one running the filter to return, and that one for it.
 
 What a Julia filter throws fails the conversion, and is thrown as a
 `FilterError` holding the exception and where it was thrown.
@@ -92,22 +125,31 @@ pandocjl -F other-filter input.md              # anything else: as pandoc does
   of its own, once per process (again if it changes), and its
   `run_filter` hands `f` over: it runs on the document directly. Scripts
   that read the JSON themselves run as a subprocess, with this Julia and
-  its load path; so do scripts with a line `# pandocjl: subprocess`, those
-  named in `$PANDOCJL_SUBPROCESS` (paths, file names, names without `.jl`,
-  or `*`), and, with a warning, those that fail to load. A script's
-  globals persist between the documents of one process.
+  its load path; so do scripts with a line `# pandocjl: subprocess` and
+  those named in `$PANDOCJL_SUBPROCESS` (paths, file names, names without
+  `.jl`, or `*`). A script that fails to load in process, or hands no
+  filter over, is not run again as a subprocess (its side effects would
+  happen twice): the conversion fails (`LibPandoc.ScriptFailed`), naming
+  those two ways. A script's globals persist between the documents of one
+  process, and so do its changes to `ENV`, the packages it loads and the
+  tasks it starts: it runs with all your rights, as any filter but a wasm
+  one. Its `cd` is undone when it returns, so the output goes where it was
+  named.
 - **A wasm filter** (`-F name.wasm`): a pandoc JSON filter built for WASI
   (`wasm32-wasip1`), such as any [panir](https://github.com/ickc/panir) Rust
   filter; see [libpandoc-rs](https://github.com/ickc/libpandoc-rs). It runs
   in wasmtime, sandboxed: it sees the current directory, read-only, and no
   network. It may call pandoc (libpandoc-rs's `libpandoc` crate built for
   wasm): in pandoc's sandbox, with options that name no files (libpandoc
-  checks them, `"untrusted"`, 1.7: the same for every host). Limits, which
+  checks them, `"untrusted"`: the same for every host). Limits, which
   pandoc has for no filter: `$LIBPANDOC_WASM_TIMEOUT` (seconds, as
-  pandoc-server's `--timeout`; its calls to pandoc included) and
+  pandoc-server's `--timeout`; its calls to pandoc included: each runs
+  with the time the filter has left as its `"timeout"`) and
   `$LIBPANDOC_WASM_MAX_MEMORY` (bytes, or with `k`, `m`, `g`, as pandoc's
-  `+RTS -M`) stop a filter past them; none by default, as pandoc.
-  `WasmFilter(path; timeout, max_memory)` for one filter.
+  `+RTS -M`; its output, standard output and error, counts too) stop a
+  filter past them; none by default (or 0), as pandoc; negative ones are
+  refused. `WasmFilter(path; timeout, max_memory)` for one filter. Its
+  standard error goes to this process's.
 
   Unlike Julia, Lua and JSON filters, which can do anything you can
   (pandoc's `--sandbox` doesn't limit filters), a wasm filter can't reach
@@ -153,13 +195,21 @@ pandoc's 284 ms).
 
 ## Installing
 
-LibPandoc.jl needs Julia 1.12 or later. It finds libpandoc:
+LibPandoc.jl needs Julia 1.12 or later, and libpandoc 1.11 or a later
+1.x (its ABI version, checked when the library is loaded). It finds libpandoc:
 `$LIBPANDOC_PATH` (the library), else `$LIBPANDOC_PREFIX` or
 `$CONDA_PREFIX` (a prefix with `lib/libpandoc.so`, `.dylib`, or
 `bin/pandoc.dll`), else libpandoc's release build, downloaded once into
-`~/.local/share/libpandoc` (`$LIBPANDOC_DOWNLOAD_DIR`), where
+`~/.local/share/libpandoc` (`$LIBPANDOC_DOWNLOAD_DIR`; from
+`$LIBPANDOC_DOWNLOAD_URL`, a URL or a file, for a mirror), where
 libpandoc-rs keeps it too. Linux (x86-64, aarch64), macOS (Intel, Apple
 silicon) and Windows (x86-64).
+
+The download is checked against the release's `SHA256SUMS`: that it
+arrived whole, not that it is the one meant (the sums come from the same
+release). It is the `continuous` release, which changes, but the copy is
+not downloaded again by itself: one too old for this package fails when
+it is loaded, naming the directory to remove to download the current one.
 
 Status: a prototype.
 

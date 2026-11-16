@@ -222,61 +222,60 @@ function (f::WasmFilter)(json::Union{AbstractString, AbstractVector{UInt8}}, c::
     end
     store = GC.@preserve run @ccall libwasmtime.wasmtime_store_new(w.engine::Ptr{Cvoid},
         pointer_from_objref(run)::Ptr{Cvoid}, C_NULL::Ptr{Cvoid})::Ptr{Cvoid}
-    function body()
-        try
-            GC.@preserve run begin
-                ctx = @ccall libwasmtime.wasmtime_store_context(store::Ptr{Cvoid})::Ptr{Cvoid}
-                @ccall libwasmtime.wasmtime_store_limiter(store::Ptr{Cvoid}, something(max_memory, -1)::Int64,
-                                                          (-1)::Int64, (-1)::Int64, (-1)::Int64, (-1)::Int64)::Cvoid
-                @ccall libwasmtime.wasmtime_context_set_epoch_deadline(ctx::Ptr{Cvoid}, UInt64(ticks)::UInt64)::Cvoid
-                started = _now()
-                timeout === nothing || (run.deadline = started + timeout)
-                # a failure, with the limit it may have met
-                function failed(msg; interrupted = false)
-                    interrupted && error("$(f.name): stopped after $(round(_now() - started; digits = 1)) s, " *
-                                         "its time limit ($TIMEOUT_VAR: $timeout)")
-                    max_memory === nothing && error(msg)
-                    error("$msg (its memory limit: $max_memory bytes, $MAX_MEMORY_VAR)")
-                end
-                _check((@ccall libwasmtime.wasmtime_context_set_wasi(ctx::Ptr{Cvoid}, wasi::Ptr{Cvoid})::Ptr{Cvoid}), f.name)
-                inst = Ref{NTuple{2, UInt64}}()
-                trap = Ref{Ptr{Cvoid}}(C_NULL)
-                err = @ccall libwasmtime.wasmtime_linker_instantiate(w.linker::Ptr{Cvoid}, ctx::Ptr{Cvoid}, f.mod::Ptr{Cvoid},
-                    inst::Ptr{NTuple{2, UInt64}}, trap::Ptr{Ptr{Cvoid}})::Ptr{Cvoid}
-                _check(err, f.name)
-                trap[] == C_NULL || error("$(f.name): $(_trap_message(trap[]))")
-                ext = Ref{_Extern}()
-                found = @ccall libwasmtime.wasmtime_instance_export_get(ctx::Ptr{Cvoid}, inst::Ptr{NTuple{2, UInt64}},
-                    "_start"::Cstring, 6::Csize_t, ext::Ptr{_Extern})::Bool
-                found && ext[].kind == _EXTERN_FUNC || error("$(f.name): not a WASI command (no _start)")
-                func = Ref(ext[].of[1:2])
-                err = @ccall gc_safe = true libwasmtime.wasmtime_func_call(ctx::Ptr{Cvoid}, func::Ptr{NTuple{2, UInt64}},
-                    C_NULL::Ptr{Cvoid}, 0::Csize_t, C_NULL::Ptr{Cvoid}, 0::Csize_t, trap::Ptr{Ptr{Cvoid}})::Ptr{Cvoid}
-                msg, interrupted = nothing, false
-                if err != C_NULL
-                    status = Ref{Cint}(0)
-                    exited = @ccall libwasmtime.wasmtime_error_exit_status(err::Ptr{Cvoid}, status::Ptr{Cint})::Bool
-                    msg = exited ? (status[] == 0 ? nothing : "$(f.name) exited with status $(status[])") :
-                          "$(f.name): $(_error_message(err))"
-                    _error_delete(err)
-                end
-                if trap[] != C_NULL
-                    code = Ref{UInt8}(0xff)
-                    @ccall libwasmtime.wasmtime_trap_code(trap[]::Ptr{Cvoid}, code::Ptr{UInt8})::Bool
-                    interrupted = timeout !== nothing && code[] == _TRAP_INTERRUPT
-                    msg = "$(f.name): $(_trap_message(trap[]))"   # (which deletes the trap)
-                end
-                # its time ran out in a call to pandoc: stopped, whatever it did after
-                run.out_of_time && failed(""; interrupted = true)
-                # its output went past its limit (whether it noticed the failed write or not)
-                run.over === nothing || failed("$(f.name): its $(run.over) went past its memory limit")
-                msg === nothing || failed(msg; interrupted)
-            end
-        finally
-            @ccall libwasmtime.wasmtime_store_delete(store::Ptr{Cvoid})::Cvoid
+    # (the clock, if it has a time limit, while it runs)
+    body() = GC.@preserve run begin
+        ctx = @ccall libwasmtime.wasmtime_store_context(store::Ptr{Cvoid})::Ptr{Cvoid}
+        @ccall libwasmtime.wasmtime_store_limiter(store::Ptr{Cvoid}, something(max_memory, -1)::Int64,
+                                                  (-1)::Int64, (-1)::Int64, (-1)::Int64, (-1)::Int64)::Cvoid
+        @ccall libwasmtime.wasmtime_context_set_epoch_deadline(ctx::Ptr{Cvoid}, UInt64(ticks)::UInt64)::Cvoid
+        started = _now()
+        timeout === nothing || (run.deadline = started + timeout)
+        # a failure, with the limit it may have met
+        function failed(msg; interrupted = false)
+            interrupted && error("$(f.name): stopped after $(round(_now() - started; digits = 1)) s, " *
+                                 "its time limit ($TIMEOUT_VAR: $timeout)")
+            max_memory === nothing && error(msg)
+            error("$msg (its memory limit: $max_memory bytes, $MAX_MEMORY_VAR)")
         end
+        _check((@ccall libwasmtime.wasmtime_context_set_wasi(ctx::Ptr{Cvoid}, wasi::Ptr{Cvoid})::Ptr{Cvoid}), f.name)
+        inst = Ref{NTuple{2, UInt64}}()
+        trap = Ref{Ptr{Cvoid}}(C_NULL)
+        err = @ccall libwasmtime.wasmtime_linker_instantiate(w.linker::Ptr{Cvoid}, ctx::Ptr{Cvoid}, f.mod::Ptr{Cvoid},
+            inst::Ptr{NTuple{2, UInt64}}, trap::Ptr{Ptr{Cvoid}})::Ptr{Cvoid}
+        _check(err, f.name)
+        trap[] == C_NULL || error("$(f.name): $(_trap_message(trap[]))")
+        ext = Ref{_Extern}()
+        found = @ccall libwasmtime.wasmtime_instance_export_get(ctx::Ptr{Cvoid}, inst::Ptr{NTuple{2, UInt64}},
+            "_start"::Cstring, 6::Csize_t, ext::Ptr{_Extern})::Bool
+        found && ext[].kind == _EXTERN_FUNC || error("$(f.name): not a WASI command (no _start)")
+        func = Ref(ext[].of[1:2])
+        err = @ccall gc_safe = true libwasmtime.wasmtime_func_call(ctx::Ptr{Cvoid}, func::Ptr{NTuple{2, UInt64}},
+            C_NULL::Ptr{Cvoid}, 0::Csize_t, C_NULL::Ptr{Cvoid}, 0::Csize_t, trap::Ptr{Ptr{Cvoid}})::Ptr{Cvoid}
+        msg, interrupted = nothing, false
+        if err != C_NULL
+            status = Ref{Cint}(0)
+            exited = @ccall libwasmtime.wasmtime_error_exit_status(err::Ptr{Cvoid}, status::Ptr{Cint})::Bool
+            msg = exited ? (status[] == 0 ? nothing : "$(f.name) exited with status $(status[])") :
+                  "$(f.name): $(_error_message(err))"
+            _error_delete(err)
+        end
+        if trap[] != C_NULL
+            code = Ref{UInt8}(0xff)
+            @ccall libwasmtime.wasmtime_trap_code(trap[]::Ptr{Cvoid}, code::Ptr{UInt8})::Bool
+            interrupted = timeout !== nothing && code[] == _TRAP_INTERRUPT
+            msg = "$(f.name): $(_trap_message(trap[]))"   # (which deletes the trap)
+        end
+        # its time ran out in a call to pandoc: stopped, whatever it did after
+        run.out_of_time && failed(""; interrupted = true)
+        # its output went past its limit (whether it noticed the failed write or not)
+        run.over === nothing || failed("$(f.name): its $(run.over) went past its memory limit")
+        msg === nothing || failed(msg; interrupted)
     end
-    timeout === nothing ? body() : _with_clock(body, w)
+    try
+        timeout === nothing ? body() : _with_clock(body, w)
+    finally
+        @ccall libwasmtime.wasmtime_store_delete(store::Ptr{Cvoid})::Cvoid
+    end
     take!(run.stdout)
 end
 

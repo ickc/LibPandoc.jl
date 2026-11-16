@@ -95,6 +95,12 @@ cells(b::CodeBlock, ctx) = "cells" in b.attr.classes ?
     reduce(vcat, (d.blocks for d in Pandoc.read_many(split(b.text, '\n'), ctx.conversion))) : nothing
 ```
 
+It calls pandoc from its own task. A filter that waits for a conversion
+with Julia filters started in another task (`@async`, `Threads.@spawn`
+when it lands on the same thread) waits forever: pandoc returns to the
+thread that called it, so the conversion started inside the filter waits
+for the one running the filter to return, and that one for it.
+
 What a Julia filter throws fails the conversion, and is thrown as a
 `FilterError` holding the exception and where it was thrown.
 

@@ -11,8 +11,9 @@
 # sandbox only, and no options that read or write files, fetch or run anything
 # (its list, which every host shares).
 #
-# Limits, which pandoc has for no filter: a timeout (wall-clock, pandoc's calls
-# included) and a memory limit (the filter's own memory), from
+# Limits, which pandoc has for no filter: a timeout (wall-clock, its calls to
+# pandoc included: each runs with the time the filter has left as its
+# "timeout") and a memory limit (the filter's own memory), from
 # $LIBPANDOC_WASM_TIMEOUT (seconds, as pandoc-server's --timeout) and
 # $LIBPANDOC_WASM_MAX_MEMORY (bytes, or with k, m or g, as pandoc's +RTS -M),
 # or per filter; none by default, as pandoc.
@@ -75,7 +76,9 @@ It may call pandoc (libpandoc-rs's `libpandoc` crate built for wasm): in
 pandoc's sandbox, with options that name no files.
 
 It fails when it runs longer than `timeout` seconds (its calls to pandoc
-included) or its memory would grow past `max_memory` bytes: `nothing` for
+included: each runs with the time the filter has left as its `"timeout"`,
+and one made after that fails at once) or its memory would grow past
+`max_memory` bytes: `nothing` for
 no limit, `missing` (the default) for what `\$LIBPANDOC_WASM_TIMEOUT` and
 `\$LIBPANDOC_WASM_MAX_MEMORY` say when it runs (seconds; bytes, or with `k`,
 `m` or `g`), none if unset.
@@ -110,12 +113,19 @@ end
 
 Base.show(io::IO, f::WasmFilter) = print(io, "WasmFilter(", repr(f.name), ")")
 
-# A run's state, the store's data: the filter's stdout, and the result of
-# its last call to pandoc.
+# A run's state, the store's data: the filter's stdout, the result of its
+# last call to pandoc, its deadline (`_now()`'s; nothing for none), and
+# whether its time ran out in a call to pandoc.
 mutable struct _WasmRun
     stdout::IOBuffer
     result::Any   # nothing, (output, log) or a PandocError
+    deadline::Union{Nothing, Float64}
+    out_of_time::Bool
 end
+_WasmRun() = _WasmRun(IOBuffer(), nothing, nothing, false)
+
+# Seconds, monotonic.
+_now() = time_ns() / 1e9
 
 function _stdout_write(data::Ptr{Cvoid}, buf::Ptr{UInt8}, len::Csize_t)::Cssize_t
     run = unsafe_pointer_to_objref(data)::_WasmRun
@@ -143,7 +153,7 @@ function (f::WasmFilter)(json::Union{AbstractString, AbstractVector{UInt8}}, c::
     max_memory = f.max_memory === missing ? _parse_memory(get(ENV, MAX_MEMORY_VAR, "")) : f.max_memory
     timeout === nothing || _ticking(w)
     doc = _bytes(json)
-    run = _WasmRun(IOBuffer(), nothing)
+    run = _WasmRun()
     wasi = @ccall libwasmtime.wasi_config_new()::Ptr{Cvoid}
     argv = [f.name, something(c.format, "")]
     env = _filter_env(c)
@@ -175,10 +185,11 @@ function (f::WasmFilter)(json::Union{AbstractString, AbstractVector{UInt8}}, c::
                                                       (-1)::Int64, (-1)::Int64, (-1)::Int64, (-1)::Int64)::Cvoid
             ticks = timeout === nothing ? typemax(UInt64) ÷ 2 : UInt64(ceil(timeout / _TICK)) + 1
             @ccall libwasmtime.wasmtime_context_set_epoch_deadline(ctx::Ptr{Cvoid}, ticks::UInt64)::Cvoid
-            started = time()
+            started = _now()
+            timeout === nothing || (run.deadline = started + timeout)
             # a failure, with the limit it may have met
             function failed(msg; interrupted = false)
-                interrupted && error("$(f.name): stopped after $(round(time() - started; digits = 1)) s, " *
+                interrupted && error("$(f.name): stopped after $(round(_now() - started; digits = 1)) s, " *
                                      "its time limit ($TIMEOUT_VAR: $timeout)")
                 max_memory === nothing && error(msg)
                 error("$msg (its memory limit: $max_memory bytes, $MAX_MEMORY_VAR)")
@@ -197,18 +208,23 @@ function (f::WasmFilter)(json::Union{AbstractString, AbstractVector{UInt8}}, c::
             func = Ref(ext[].of[1:2])
             err = @ccall gc_safe = true libwasmtime.wasmtime_func_call(ctx::Ptr{Cvoid}, func::Ptr{NTuple{2, UInt64}},
                 C_NULL::Ptr{Cvoid}, 0::Csize_t, C_NULL::Ptr{Cvoid}, 0::Csize_t, trap::Ptr{Ptr{Cvoid}})::Ptr{Cvoid}
+            msg, interrupted = nothing, false
             if err != C_NULL
                 status = Ref{Cint}(0)
                 exited = @ccall libwasmtime.wasmtime_error_exit_status(err::Ptr{Cvoid}, status::Ptr{Cint})::Bool
-                msg = exited ? "$(f.name) exited with status $(status[])" : "$(f.name): $(_error_message(err))"
+                msg = exited ? (status[] == 0 ? nothing : "$(f.name) exited with status $(status[])") :
+                      "$(f.name): $(_error_message(err))"
                 _error_delete(err)
-                exited && status[] == 0 || failed(msg)
             end
             if trap[] != C_NULL
                 code = Ref{UInt8}(0xff)
                 @ccall libwasmtime.wasmtime_trap_code(trap[]::Ptr{Cvoid}, code::Ptr{UInt8})::Bool
-                failed("$(f.name): $(_trap_message(trap[]))"; interrupted = timeout !== nothing && code[] == _TRAP_INTERRUPT)
+                interrupted = timeout !== nothing && code[] == _TRAP_INTERRUPT
+                msg = "$(f.name): $(_trap_message(trap[]))"   # (which deletes the trap)
             end
+            # its time ran out in a call to pandoc: stopped, whatever it did after
+            run.out_of_time && failed(""; interrupted = true)
+            msg === nothing || failed(msg; interrupted)
         end
     finally
         @ccall libwasmtime.wasmtime_store_delete(store::Ptr{Cvoid})::Cvoid
@@ -255,7 +271,8 @@ function _host(f, caller)
     end
 end
 
-# A call's answer, kept for result_len and result_read; the status.
+# A call's answer, kept for result_len and result_read; the status. A call
+# that ends past the filter's deadline ends the filter.
 function _answer!(run::_WasmRun, f)
     run.result = try
         f()
@@ -263,7 +280,26 @@ function _answer!(run::_WasmRun, f)
         e isa PandocError || rethrow()
         e
     end
+    run.deadline === nothing || _now() < run.deadline || (run.out_of_time = true)
     Int32(run.result isa PandocError)
+end
+
+# The seconds the filter has left (nothing: no limit); a call made with none
+# left fails at once, as a "Timeout".
+function _time_left(run::_WasmRun)
+    run.deadline === nothing && return nothing
+    left = run.deadline - _now()
+    left > 0 && return left
+    run.out_of_time = true
+    throw(PandocError("Timeout", "the filter's time limit is reached"))
+end
+
+# Options a filter gives pandoc, within its time: their "timeout" the time
+# it has left, or its own if shorter.
+function _within(opts::Dict{String, Any}, left)
+    own = get(opts, "timeout", nothing)
+    left === nothing || own isa Real && !(own isa Bool) && 0 < own < left || (opts["timeout"] = left)
+    opts
 end
 
 _guest_json(caller, p, l) = try
@@ -279,7 +315,8 @@ function _import_convert(env::Ptr{Cvoid}, caller::Ptr{Cvoid}, args::Ptr{UInt64},
         run = _run(caller)
         input = has != 0 ? _guest_bytes(caller, i, il) : nothing
         _ret!(args, _answer!(run, () -> begin
-            opts = _untrusted(_guest_json(caller, o, ol))
+            left = _time_left(run)
+            opts = _within(_untrusted(_guest_json(caller, o, ol)), left)
             input === nothing && throw(PandocError("PandocOptionError", "a wasm filter gives convert its input"))
             _call_raw(:convert, JSON.json(opts), input)
         end))
@@ -291,10 +328,11 @@ function _import_read_many(env::Ptr{Cvoid}, caller::Ptr{Cvoid}, args::Ptr{UInt64
         p, l = _arg(args, 1), _arg(args, 2)
         run = _run(caller)
         _ret!(args, _answer!(run, () -> begin
+            left = _time_left(run)
             req = _guest_json(caller, p, l)
             req isa AbstractDict || _refuse("a request that isn't an object")
             req = Dict{String, Any}(req)
-            req["options"] = _untrusted(get(req, "options", Dict{String, Any}()))
+            req["options"] = _within(_untrusted(get(req, "options", Dict{String, Any}())), left)
             _call_raw(:read_many, JSON.json(req))
         end))
     end
@@ -305,6 +343,7 @@ function _import_query(env::Ptr{Cvoid}, caller::Ptr{Cvoid}, args::Ptr{UInt64}, n
         p, l = _arg(args, 1), _arg(args, 2)
         run = _run(caller)
         _ret!(args, _answer!(run, () -> begin
+            _time_left(run)
             _call_raw(:query, JSON.json(_untrusted(_guest_json(caller, p, l))))
         end))
     end

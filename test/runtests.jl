@@ -331,6 +331,20 @@ end
             @test failure(wasm("upper"), "hi") === nothing
         end
         @test failure(WasmFilter(wasm("upper"); timeout = 60, max_memory = 1 << 30), "hi") === nothing
+        # the time limit covers its calls to pandoc: each runs with the time
+        # it has left (the review's 100,000 nested block quotes: minutes)
+        slow = ">"^100_000
+        for request in (Dict("convert" => [Dict("from" => "markdown", "to" => "html"), slow]),
+                        Dict("read_many" => [[slow], Dict("from" => "markdown")]))
+            t = @elapsed msg = failure(WasmFilter(wasm("calls"); timeout = 1), "```call\n$(JSON.json(request))\n```")
+            @test msg !== nothing && contains(msg, "its time limit")
+            @test t < 4
+        end
+        # the filter's own shorter "timeout" is kept: its call fails, it goes on
+        request = Dict("convert" => [Dict("from" => "markdown", "to" => "html", "timeout" => 0.2), slow])
+        out = JSON.parse(P.convert("```call\n$(JSON.json(request))\n```"; to = "json",
+                                   filters = [WasmFilter(wasm("calls"); timeout = 30)]))
+        @test JSON.parse(out["blocks"][1]["c"][2])["error"][1] == "Timeout"
     end
     @test LibPandoc._parse_timeout("2") == 2.0 && LibPandoc._parse_timeout("0.5") == 0.5
     @test LibPandoc._parse_timeout("") === nothing && LibPandoc._parse_timeout("0") === nothing

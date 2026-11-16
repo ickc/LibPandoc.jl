@@ -116,7 +116,8 @@ pandocjl -F other-filter input.md              # anything else: as pandoc does
   wasm): in pandoc's sandbox, with options that name no files (libpandoc
   checks them, `"untrusted"`: the same for every host). Limits, which
   pandoc has for no filter: `$LIBPANDOC_WASM_TIMEOUT` (seconds, as
-  pandoc-server's `--timeout`; its calls to pandoc included) and
+  pandoc-server's `--timeout`; its calls to pandoc included: each runs
+  with the time the filter has left as its `"timeout"`) and
   `$LIBPANDOC_WASM_MAX_MEMORY` (bytes, or with `k`, `m`, `g`, as pandoc's
   `+RTS -M`) stop a filter past them; none by default, as pandoc.
   `WasmFilter(path; timeout, max_memory)` for one filter.

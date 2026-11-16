@@ -89,8 +89,10 @@ function make_lab()
     Lab(root, work, secret, outside, out, joinpath(root, "data"), "http://127.0.0.1:$(Int(port))", connections), server
 end
 
-mounted(options, read, write = String[]) = merge(options, Dict("sandbox" => Dict("read" => String[named(d) for d in read],
-                                                                                 "write" => String[named(d) for d in write])))
+# (directories are listed as the host names them; `named` is for what the
+# module is told: on Windows the two differ)
+mounted(options, read, write = String[]) = merge(options, Dict("sandbox" => Dict("read" => String[String(d) for d in read],
+                                                                                 "write" => String[String(d) for d in write])))
 
 # A conversion as the host gives it: (status, output, kind, message, log).
 function convert_raw(options::Dict, input = nothing)

@@ -139,8 +139,10 @@ pandocjl -F other-filter input.md              # anything else: as pandoc does
   pandoc-server's `--timeout`; its calls to pandoc included: each runs
   with the time the filter has left as its `"timeout"`) and
   `$LIBPANDOC_WASM_MAX_MEMORY` (bytes, or with `k`, `m`, `g`, as pandoc's
-  `+RTS -M`) stop a filter past them; none by default, as pandoc.
-  `WasmFilter(path; timeout, max_memory)` for one filter.
+  `+RTS -M`; its output, standard output and error, counts too) stop a
+  filter past them; none by default (or 0), as pandoc; negative ones are
+  refused. `WasmFilter(path; timeout, max_memory)` for one filter. Its
+  standard error goes to this process's.
 
   Unlike Julia, Lua and JSON filters, which can do anything you can
   (pandoc's `--sandbox` doesn't limit filters), a wasm filter can't reach

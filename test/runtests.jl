@@ -11,6 +11,31 @@ wasm(name) = joinpath(WASM, "$name.wasm")
 
 const EMPTY_WASM = P._EMPTY_WASM   # a WASI command doing nothing
 
+# A wasm module from its text (wasmtime's wat2wasm).
+function wat(text::String)
+    v = Ref(P._Vec(0, C_NULL))
+    P._check((@ccall P.libwasmtime.wasmtime_wat2wasm(text::Ptr{UInt8}, sizeof(text)::Csize_t, v::Ptr{P._Vec})::Ptr{Cvoid}), "wat")
+    bytes = copy(unsafe_wrap(Vector{UInt8}, v[].data, v[].size))
+    @ccall P.libwasmtime.wasm_byte_vec_delete(v::Ptr{P._Vec})::Cvoid
+    bytes
+end
+
+# A WASI command writing 64 KiB at a time to descriptor `fd`, 256 MiB in all
+# or until a write fails, then exiting normally.
+FLOOD(fd) = """
+    (module
+      (import "wasi_snapshot_preview1" "fd_write" (func \$w (param i32 i32 i32 i32) (result i32)))
+      (memory (export "memory") 2)
+      (func (export "_start") (local \$n i32)
+        (i32.store (i32.const 0) (i32.const 1024))
+        (i32.store (i32.const 4) (i32.const 65536))
+        (loop \$l
+          (if (i32.eqz (call \$w (i32.const $fd) (i32.const 0) (i32.const 1) (i32.const 8)))
+            (then
+              (local.set \$n (i32.add (local.get \$n) (i32.const 1)))
+              (br_if \$l (i32.lt_u (local.get \$n) (i32.const 4096))))))))
+    """
+
 const PROJECT = dirname(Base.active_project())
 
 # pandocjl ARGS as a separate process: (status, stdout, stderr)
@@ -365,6 +390,28 @@ end
         @test_throws PandocError P.convert("x"; to = "html", filters = [f])   # which isn't a document
         Base.write(joinpath(d, "bad.wasm"), "not wasm")
         @test_throws ErrorException WasmFilter(joinpath(d, "bad.wasm"))
+        # its output is counted against its memory limit: standard output (kept
+        # in this process) and standard error (passed on)
+        for (fd, stream) in ((1, "standard output"), (2, "standard error"))
+            flood = joinpath(d, "flood$fd.wasm")
+            Base.write(flood, wat(FLOOD(fd)))
+            msg = try
+                redirect_stderr(devnull) do
+                    WasmFilter(flood; max_memory = 4 << 20)("{}", Conversion())
+                end
+                nothing
+            catch err
+                sprint(showerror, err)
+            end
+            @test msg !== nothing && contains(msg, stream) && contains(msg, "memory limit: 4194304 bytes")
+        end
+        # limits out of range: refused, not taken for none (or for an instant)
+        for bad in (-1, NaN, Inf, -Inf)
+            @test_throws ArgumentError WasmFilter(e; timeout = bad)
+        end
+        @test_throws ArgumentError WasmFilter(e; max_memory = -1)
+        @test WasmFilter(e; timeout = 1e300)("{}", Conversion()) == UInt8[]   # huge: none in practice
+        @test WasmFilter(e; timeout = 0).timeout === nothing && WasmFilter(e; max_memory = 0).max_memory === nothing  # 0: none, as the variables
     end
     if isempty(WASM)
         @info "wasm filters: set LIBPANDOC_WASM_FILTERS to libpandoc-rs's filters built for wasm32-wasip1 to test them"
@@ -476,6 +523,9 @@ end
     @test_throws ErrorException LibPandoc._parse_timeout("2s")
     @test LibPandoc._parse_memory("512M") == 512 << 20 && LibPandoc._parse_memory("64k") == 64 << 10
     @test LibPandoc._parse_memory("4096") == 4096 && LibPandoc._parse_memory("") === nothing
+    # too large to hold: no limit in practice, not a wrapped number (17179869184g was 0: none)
+    @test LibPandoc._parse_memory("17179869184g") == LibPandoc._parse_memory("99999999999999g") >= 1 << 62
+    @test LibPandoc._parse_timeout("1e300") == 1e300
     @test_throws ErrorException LibPandoc._parse_memory("12x")
 end
 

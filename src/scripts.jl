@@ -91,14 +91,14 @@ function _script(path, name, @nospecialize(options))
     (json, context) -> _subprocess(path, json, context)
 end
 
-"As pandoc runs a JSON filter, with this Julia and its load path."
+"As libpandoc runs a JSON filter (its variables), with this Julia and its load path."
 function _subprocess(path, json::String, context)
-    fmt = something(get(context, "format", nothing), "")
+    c = _conversion(context, nothing)
+    fmt = something(c.format, "")
     env = copy(ENV)
-    env["PANDOC_VERSION"] = _version_string()
-    env["PANDOC_READER_OPTIONS"] = JSON.json(something(get(context, "reader-options", nothing), Dict()))
-    env["PANDOC_INPUT_FORMAT"] = something(get(context, "input-format", nothing), "")
-    env["PANDOC_OUTPUT_FORMAT"] = something(get(context, "output-format", nothing), "")
+    # a format libpandoc doesn't know is unset, as for a wasm filter
+    delete!(env, "PANDOC_INPUT_FORMAT"), delete!(env, "PANDOC_OUTPUT_FORMAT"), delete!(env, "PANDOC_WRITER_OPTIONS")
+    merge!(env, Dict(_filter_env(c)))
     env["JULIA_LOAD_PATH"] = join(Base.load_path(), Sys.iswindows() ? ';' : ':')
     cmd = `$(Base.julia_cmd()) --startup-file=no $path $fmt`
     out = IOBuffer()

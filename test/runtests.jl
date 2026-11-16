@@ -23,6 +23,7 @@ function pandocjl(args...; input = "", env = Dict{String, String}(), dir = pwd()
 end
 
 upper(s::Str) = Str(uppercase(s.text))
+_filter_env_of(w) = P._filter_env(Conversion(; writer_options = w))
 demote(h::Header) = (h.level += 1; nothing)
 
 @testset "LibPandoc" begin
@@ -160,6 +161,10 @@ end
     @test startswith(c.output_format, "html5")
     @test c.reader_options["tab-stop"] == 2
     @test c.options["tab-stop"] == 2 && !haskey(c.options, "filters")
+    # the writer's options (libpandoc's "writer-options", as Lua's PANDOC_WRITER_OPTIONS)
+    P.convert("x"; to = "latex", number_sections = true, top_level_division = "chapter", filters = [see])
+    w = got[].writer_options
+    @test w["number-sections"] == true && w["top-level-division"] == "top-level-chapter"
 end
 
 @testset "a filter calls pandoc" begin
@@ -261,6 +266,15 @@ end
         sleep(1.1)  # mtime's resolution
         Base.write(s, "using Panir\nrun_filter(s::Str -> Str(lowercase(s.text)))")
         @test P.convert("HI"; to = "plain", filters = [s]) == "hi\n"
+        # told the writer's options: in process, and as a subprocess
+        wo = joinpath(d, "wo.jl")
+        Base.write(wo, "using Panir\nrun_filter((d::Panir.Pandoc, ctx) -> (push!(d.blocks, " *
+                       "Para(string(ctx.conversion.writer_options[\"number-sections\"]))); nothing))")
+        @test P.convert("x"; to = "plain", number_sections = true, filters = [wo]) == "x\n\ntrue\n"
+        wsub = joinpath(d, "wsub.jl")
+        Base.write(wsub, "# pandocjl: subprocess\n" * Base.read(wo, String))
+        @test P.convert("x"; to = "plain", number_sections = true, filters = [wsub]) == "x\n\ntrue\n"
+        @test P._SCRIPTS[abspath(wsub)].filter === nothing
         # a script's traverse
         td = joinpath(d, "td.jl")
         Base.write(td, "using Panir\nseen = String[]\nf(x::Union{Para, Str}) = (push!(seen, string(nameof(typeof(x)))); nothing)\n" *
@@ -289,6 +303,11 @@ end
         told = JSON.parse(out["blocks"][end]["c"][2])
         @test startswith(told["input-format"], "commonmark") && told["format"] == "json"
         @test told["reader-options"] == true && told["pandoc-version"] == P._version_string()
+        out = JSON.parse(P.convert("x"; to = "json", number_sections = true, filters = [wasm("conversion")]))
+        @test JSON.parse(out["blocks"][end]["c"][2])["number-sections"] == true   # PANDOC_WRITER_OPTIONS
+        # without the variables when it would be too long for an environment variable
+        big = Dict(_filter_env_of(Dict("variables" => Dict("v" => "x"^40_000), "toc-depth" => 3)))
+        @test haskey(JSON.parse(big["PANDOC_WRITER_OPTIONS"]), "toc-depth") && !contains(big["PANDOC_WRITER_OPTIONS"], "variables")
         # calling pandoc
         @test P.convert("```parse\n*a*\n```\n\n```parse\n# b\n```\n"; from = "markdown", to = "html",
                         filters = [wasm("parse")]) == "<p><em>a</em></p>\n<h1 id=\"b\">b</h1>\n"

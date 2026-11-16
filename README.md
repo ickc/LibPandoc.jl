@@ -63,12 +63,16 @@ reader keeps in memory, such as a docx's images, reaches the writer):
   `Panir.walk!` walks: return `nothing` to keep a node, a node to replace
   it, a vector to splice in. A method may take the context too,
   `f(x, ctx)`: `ctx.conversion` says how pandoc reads and writes (input and
-  output formats with extensions, reader options, the options). The order
+  output formats with extensions, the reader's and the writer's options,
+  `writer_options` being Lua's `PANDOC_WRITER_OPTIONS`: `-N`,
+  `--top-level-division`, ...; and the options). The order
   is pandoc's Lua filters' by default; `f => :topdown` or `f => :bottomup`
   for another. Consecutive Julia filters share one parse of the document.
 - `RawFilter(f)`: `f(json, conversion)` on pandoc's JSON as it is.
 - **Julia filter scripts** (`"foo.jl"`), in this process (below).
 - **Wasm filters** (`"foo.wasm"`, or `WasmFilter(path)`), in this process.
+  They, and scripts run as a subprocess, get the variables libpandoc gives
+  JSON filters (`PANDOC_WRITER_OPTIONS` among them).
 - pandoc's own: Lua filters, JSON filters (programs), `"citeproc"`.
 
 A filter may call pandoc. `Pandoc.read(text, ctx.conversion)` parses a

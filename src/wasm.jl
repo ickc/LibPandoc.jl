@@ -3,7 +3,8 @@
 #
 # A wasm filter is a pandoc JSON filter built for WASI (`wasm32-wasip1`):
 # the document on stdin, the new one on stdout, the output format as its
-# first argument, pandoc's variables in its environment. It runs sandboxed:
+# first argument, the variables libpandoc gives JSON filters in its
+# environment (PANDOC_WRITER_OPTIONS among them). It runs sandboxed:
 # it sees only the directories it is given (the current one, read-only, by
 # default), no network. It may call pandoc through the imports of module
 # `libpandoc` (libpandoc-rs's `guest.rs`), which this host answers on this
@@ -133,12 +134,24 @@ function _stdout_write(data::Ptr{Cvoid}, buf::Ptr{UInt8}, len::Csize_t)::Cssize_
     Cssize_t(len)
 end
 
-"The environment pandoc gives a JSON filter, as libpandoc does."
+"""
+The environment variables a JSON filter run by libpandoc gets: pandoc's
+(`PANDOC_VERSION`, `PANDOC_READER_OPTIONS`) and libpandoc's (the formats
+with extensions, `PANDOC_WRITER_OPTIONS`: without `variables` if it would
+be longer than 32,000 bytes, an environment variable's limit on Windows,
+as libpandoc does).
+"""
 function _filter_env(c::Conversion)
     env = ["PANDOC_VERSION" => _version_string(),
            "PANDOC_READER_OPTIONS" => JSON.json(something(c.reader_options, Dict()))]
     c.input_format === nothing || push!(env, "PANDOC_INPUT_FORMAT" => c.input_format)
     c.output_format === nothing || push!(env, "PANDOC_OUTPUT_FORMAT" => c.output_format)
+    w = c.writer_options
+    if w !== nothing
+        text = JSON.json(w)
+        sizeof(text) > 32_000 && (text = JSON.json(Dict(k => v for (k, v) in w if k != "variables")))
+        push!(env, "PANDOC_WRITER_OPTIONS" => text)
+    end
     env
 end
 

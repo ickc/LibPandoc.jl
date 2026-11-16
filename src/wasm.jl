@@ -310,8 +310,8 @@ function _host(f, caller)
         f()
         C_NULL
     catch e
-        msg = sprint(showerror, e)
-        @ccall libwasmtime.wasmtime_trap_new(msg::Cstring, sizeof(msg)::Csize_t)::Ptr{Cvoid}
+        msg = _message(e)
+        @ccall libwasmtime.wasmtime_trap_new(msg::Ptr{UInt8}, sizeof(msg)::Csize_t)::Ptr{Cvoid}
     end
 end
 

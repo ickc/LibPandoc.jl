@@ -260,6 +260,18 @@ end
     @test P.convert("y"; to = "plain", filters = [upper]) == "Y\n"
     bad(d::Panir.Pandoc) = Para("x")
     @test_throws FilterError P.convert("x"; to = "html", filters = [bad])
+    # one whose showerror throws too: nothing unwinds through pandoc's frames
+    # (which would skip its cleanup: the call's temporary files stayed)
+    mktempdir() do tmp
+        code = """
+            import LibPandoc as P; using Panir
+            struct Bad <: Exception end
+            Base.showerror(io::IO, ::Bad) = error("showerror fails too")
+            e = try P.convert("x"; to = "plain", filters = [(s::Str) -> throw(Bad())]) catch e; e end
+            print(e isa P.FilterError && e.exception isa Bad)"""
+        out = Base.read(addenv(`$(Base.julia_cmd()) --startup-file=no --project=$PROJECT -e $code`, "TMPDIR" => tmp, "TMP" => tmp, "TEMP" => tmp), String)
+        @test out == "true" && isempty(readdir(tmp))
+    end
 end
 
 @testset "threads" begin

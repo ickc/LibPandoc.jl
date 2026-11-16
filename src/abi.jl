@@ -141,10 +141,18 @@ function _callback_entry(ud::Ptr{Cvoid}, doc::Ptr{UInt8}, doc_len::Csize_t,
         return Cint(0)
     catch e
         cb.error = (e, catch_backtrace())
-        msg = sprint(showerror, e)
+        msg = _message(e)
         ccall(_load().buffer_set, Cvoid, (Ptr{Cvoid}, Ptr{UInt8}, Csize_t), out, msg, sizeof(msg))
         return Cint(1)
     end
+end
+
+# An exception's message, for C: whatever its `showerror` does (it may
+# throw itself), nothing unwinds into the caller's frames.
+_message(e) = try
+    sprint(showerror, e)
+catch
+    try "$(typeof(e)) (its showerror failed)" catch; "an exception" end
 end
 
 struct _Filter

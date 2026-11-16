@@ -375,6 +375,12 @@ end
             Base.run(`touch -r $(same).time $same`)
             @test P.convert("x"; to = "plain", filters = [same]) == "second\n"
         end
+        # a script run as a subprocess is stopped by the conversion's time
+        # limit, as pandoc stops a JSON filter
+        slow = joinpath(d, "slow.jl")
+        Base.write(slow, "# pandocjl: subprocess\nread(stdin); sleep(20)")
+        t = @elapsed e = try P.convert("x"; to = "plain", timeout = 1, filters = [slow]) catch e; e end
+        @test e isa PandocError && e.kind == "Timeout" && t < 10
         # a script's traverse
         td = joinpath(d, "td.jl")
         Base.write(td, "using Panir\nseen = String[]\nf(x::Union{Para, Str}) = (push!(seen, string(nameof(typeof(x)))); nothing)\n" *

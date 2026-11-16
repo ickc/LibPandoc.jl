@@ -121,14 +121,23 @@ end
 # a subprocess.
 function _script(path, name, @nospecialize(options))
     f = _load_script(path)
-    f === nothing && return (json, context) -> _subprocess(path, json, context)
+    if f === nothing
+        # the conversion's time limit, counted from now (its start): pandoc
+        # stops a JSON filter at it, so this one too
+        t = options === nothing ? nothing : get(options, "timeout", nothing)
+        deadline = t isa Real && !(t isa Bool) && t > 0 ? time() + t : nothing
+        return (json, context) -> _subprocess(path, json, context, deadline)
+    end
     run = f.first isa RawFilter ? _raw(f.first, options) :
           f.first isa WasmFilter ? _raw(RawFilter(f.first), options) : _walks([f], options)
     (json, context) -> _in_dir(() -> run(json, context))
 end
 
-"As libpandoc runs a JSON filter (its variables), with this Julia and its load path."
-function _subprocess(path, json::String, context)
+"""
+As libpandoc runs a JSON filter (its variables, and stopped at the
+conversion's `deadline`, a `time()`), with this Julia and its load path.
+"""
+function _subprocess(path, json::String, context, deadline = nothing)
     c = _conversion(context, nothing)
     fmt = something(c.format, "")
     env = copy(ENV)
@@ -138,7 +147,14 @@ function _subprocess(path, json::String, context)
     env["JULIA_LOAD_PATH"] = join(Base.load_path(), Sys.iswindows() ? ';' : ':')
     cmd = `$(Base.julia_cmd()) --startup-file=no $path $fmt`
     out = IOBuffer()
-    p = Base.run(pipeline(ignorestatus(setenv(cmd, env)); stdin = IOBuffer(json), stdout = out, stderr = stderr))
+    p = Base.run(pipeline(ignorestatus(setenv(cmd, env)); stdin = IOBuffer(json), stdout = out, stderr = stderr);
+                 wait = false)
+    if deadline !== nothing && timedwait(() -> process_exited(p), max(deadline - time(), 0.0); pollint = 0.01) === :timed_out
+        kill(p)
+        wait(p)
+        throw(PandocError("Timeout", "$path: stopped by the conversion's time limit"))
+    end
+    wait(p)
     success(p) || error("$path returned error status $(p.exitcode)")
     take!(out)
 end

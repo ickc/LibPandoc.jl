@@ -135,8 +135,8 @@ don't trust: only those that read, write, fetch and run nothing, with
 pandoc's sandbox on), and `timeout` (seconds): a conversion still running
 after that long is stopped, a `PandocError` of kind `"Timeout"`, and the
 process goes on. It stops pandoc's own code (readers, writers, templates,
-citeproc) and a JSON filter pandoc runs, not code in this process or in
-Lua: a Julia filter (a function, a script, a wasm filter, which has its own
+citeproc), a JSON filter pandoc runs and a Julia script run as a
+subprocess, not code in this process or in Lua: a Julia filter (a function, a script, a wasm filter, which has its own
 limits) runs to its end, and the conversion then fails when it returns; a
 Lua filter isn't stopped at all. There is no memory limit: for documents
 from someone you don't trust, give the conversion a process of its own and

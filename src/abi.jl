@@ -187,15 +187,19 @@ function _with_callbacks(f, cbs::Vector{_Callback})
         GC.@preserve cbs fs _pinned(() -> f(fs))
     catch e
         for cb in cbs
-            cb.error === nothing || throw(FilterError(cb.error...))
+            cb.error === nothing || throw(_filter_error(cb.error...))
         end
         rethrow()
     end
     for cb in cbs
-        cb.error === nothing || throw(FilterError(cb.error...))
+        cb.error === nothing || throw(_filter_error(cb.error...))
     end
     r
 end
+
+# What a filter threw, as the call throws it: a FilterError, but a time
+# limit's PandocError as it is (a script stopped as pandoc stops a JSON filter).
+_filter_error(e, bt) = e isa PandocError && e.kind == "Timeout" ? e : FilterError(e, bt)
 
 # -- the calls -------------------------------------------------------------------------
 

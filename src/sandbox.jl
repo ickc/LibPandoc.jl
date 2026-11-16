@@ -67,6 +67,7 @@ function _sandbox_of(@nospecialize(opts))
     read, write, timeout, max_memory = String[], String[], missing, missing
     for (k, v) in pairs(s)
         k = _key(k)
+        v === nothing && continue   # (absent: no directories, the environment's limit)
         if k in ("read", "write")
             v isa Union{AbstractVector, Tuple} && all(d -> d isa AbstractString, v) ||
                 throw(_refused("sandbox: \"$k\" lists directories as strings"))
@@ -412,7 +413,6 @@ function _sandbox_run(m::_Mounts, dirs::_Dirs, call, input, cbs::Vector{_Callbac
     timeout, max_memory = _sandbox_limits(dirs)
     mod, linker = _sandbox_module()
     w = _wasmtime()
-    timeout === nothing || _ticking(w)
     ticks = timeout === nothing ? _NO_DEADLINE : min(_NO_DEADLINE, ceil(timeout / _TICK) + 1)
     wasi = @ccall libwasmtime.wasi_config_new()::Ptr{Cvoid}
     argv, names, values = ["libpandoc"], first.(m.env), last.(m.env)
@@ -449,10 +449,11 @@ function _sandbox_run(m::_Mounts, dirs::_Dirs, call, input, cbs::Vector{_Callbac
         trap[] == C_NULL || throw(_Stopped(_trap_message(trap[]), false, nothing))
         _call_in(ctx, inst, call, input, m, length(cbs))
     end
+    # (the store's data alive meanwhile; the task on this thread, and alone
+    # in wasm on it with callbacks: above, "Threads")
+    pinned() = GC.@preserve run _blocking(() -> _pinned(body))
     result = try
-        # (the store's data alive meanwhile; the task on this thread, and
-        # alone in wasm on it with callbacks: above, "Threads")
-        GC.@preserve run _blocking(() -> _pinned(body))
+        timeout === nothing ? pinned() : _with_clock(pinned, w)
     catch e
         e isa _Stopped || rethrow()
         throw(_stopped(e, dirs, timeout, max_memory, started))

@@ -108,6 +108,21 @@ end
     @test P.convert("x"; to = "plain", output_file = "-") == "x\n"
 end
 
+@testset "nothing is an absent option" begin
+    # as Lua's nil in a table: the key is not there
+    @test P.convert("*x*"; to = nothing, timeout = nothing, sandbox = nothing, untrusted = nothing,
+                    standalone = nothing, filters = nothing) == "<p><em>x</em></p>\n"
+    @test P.convert("*x*", Dict("to" => nothing, "timeout" => nothing, "sandbox" => nothing)) == "<p><em>x</em></p>\n"
+    # a keyword nothing leaves the Dict's value
+    @test P.convert("*x*", Dict("to" => "plain"); to = nothing) == "x\n"
+    @test P.read("*x*"; timeout = nothing) == P.read("*x*")
+    @test P.write(P.read("x"); timeout = nothing) == "<p>x</p>\n"
+    @test P.read_many(["x"]; timeout = nothing, sandbox = nothing, to = nothing) == [P.read("x")]
+    # a vector with nothing in it stays an error
+    @test_throws Exception P.convert("x"; filters = [nothing])
+    @test_throws Exception P.convert(; input_files = [nothing])
+end
+
 @testset "no input: refused, not this process's standard input" begin
     # pandoc would read it and close it: Julia's stdin then reads another file
     code = """
@@ -154,7 +169,7 @@ end
 @testset "time limit" begin
     # the review's 100,000 nested block quotes: over 15 s without a limit
     slow = ">"^100_000
-    timeout(f) = (e = try f(); nothing catch e; e end; e isa PandocError && e.kind == "Timeout")
+    timeout(f) = (e = try f(); nothing catch e; e end; istimeout(e))
     t = @elapsed @test timeout(() -> P.convert(slow; to = "html", timeout = 0.5))
     @test t < 5
     @test timeout(() -> P.read(slow; timeout = 0.5))
@@ -162,7 +177,7 @@ end
     # read_many: the whole call's limit; a text not read in time fails alone
     @test timeout(() -> P.read_many(["a", slow]; timeout = 0.5))
     docs = P.read_many(["a", slow, "[x"]; timeout = 0.5, return_exceptions = true)
-    @test docs[1] isa Panir.Pandoc && docs[2] isa PandocError && docs[2].kind == "Timeout"
+    @test docs[1] isa Panir.Pandoc && istimeout(docs[2]) && !istimeout(docs[1]) && !istimeout(ErrorException("Timeout"))
     @test docs[3] isa Panir.Pandoc
     @test P.read_many(["a"]) isa Vector{Panir.Pandoc}
     # code in this process runs to its end, and the call fails then
@@ -202,7 +217,7 @@ end
     @test_logs (:warn, r"Could not load include file") match_mode = :any P.read_many(["\\input{nowhere-at-all}"], "latex")
     # as a conversion reads: its input format and reader options
     c = Conversion(; input_format = "commonmark", options = Dict{String, Any}("tab-stop" => 2))
-    @test P.read_options(c) == Dict("from" => "commonmark", "tab-stop" => 2)
+    @test P.read_options(c) == Dict("from" => "commonmark", "tab-stop" => 2, "preserve-tabs" => true)
     @test P.read("~~x~~", c).blocks[1].content[1] isa Str   # no strikeout in commonmark
 end
 
@@ -251,6 +266,19 @@ end
     @test P.convert("```parse\n*a*\n```"; to = "html", filters = [parse_blocks]) == "<p><em>a</em></p>\n"
     many(b::CodeBlock, ctx) = reduce(vcat, (d.blocks for d in P.read_many(split(b.text, '\n'), ctx.conversion)))
     @test P.convert("```\na\n*b*\n```"; to = "plain", filters = [many]) == "a\n\nb\n"
+end
+
+@testset "a filter's read keeps tabs, as pandoc.read" begin
+    # Lua's pandoc.read (pandoc 3.14: CodeBlock "x\ty"), not the pandoc
+    # command, which expands them first ("x   y")
+    c = Conversion(; input_format = "markdown", options = Dict{String, Any}())
+    code(d) = only(d.blocks).text
+    @test P.read_options(c)["preserve-tabs"] === true
+    @test code(P.read("    x\ty\n", c)) == "x\ty"
+    @test code(only(P.read_many(["    x\ty\n"], c))) == "x\ty"
+    @test code(P.read("    x\ty\n", c; preserve_tabs = false)) == "x   y"
+    # with no conversion: as the command
+    @test code(P.read("    x\ty\n")) == "x   y"
 end
 
 @testset "a filter's exception" begin
@@ -552,9 +580,12 @@ end
         @test JSON.parse(out["blocks"][1]["c"][2])["error"][1] == "Timeout"
     end
     # what a process's image holds of an earlier process (precompiling's, a
-    # system image's) is reset: the clock thread, which runs time limits, too
-    code = "import LibPandoc as P; P._CLOCK[] = UInt64(1); P.__init__(); print(P._CLOCK[] === nothing)"
-    @test Base.read(`$(Base.julia_cmd()) --startup-file=no --project=$PROJECT -e $code`, String) == "true"
+    # system image's) is reset: the clock thread, which runs time limits,
+    # too; and loading the package (with the variable set) starts none
+    code = "import LibPandoc as P; c = P._CLOCK; print(c.users, c.alive, c.thread, \" \"); " *
+           "c.users, c.alive, c.thread = 3, true, 1; P.__init__(); print(c.users, c.alive, c.thread)"
+    @test Base.read(addenv(`$(Base.julia_cmd()) --startup-file=no --project=$PROJECT -e $code`,
+                           "LIBPANDOC_WASM_TIMEOUT" => "1"), String) == "0false0 0false0"
     @test LibPandoc._parse_timeout("2") == 2.0 && LibPandoc._parse_timeout("0.5") == 0.5
     @test LibPandoc._parse_timeout("") === nothing && LibPandoc._parse_timeout("0") === nothing
     @test_throws ErrorException LibPandoc._parse_timeout("2s")
@@ -564,6 +595,49 @@ end
     @test LibPandoc._parse_memory("17179869184g") == LibPandoc._parse_memory("99999999999999g") >= 1 << 62
     @test LibPandoc._parse_timeout("1e300") == 1e300
     @test_throws ErrorException LibPandoc._parse_memory("12x")
+end
+
+@testset "the clock runs while a call with a time limit runs" begin
+    mktempdir() do d
+        empty, loop = joinpath(d, "empty.wasm"), joinpath(d, "loop.wasm")
+        Base.write(empty, EMPTY_WASM)
+        Base.write(loop, wat("""(module (memory (export "memory") 1)
+                                  (func (export "_start") (loop \$l (br \$l))))"""))
+        c = P._CLOCK
+        state() = (lock(c.lock); s = (c.users, c.alive); unlock(c.lock); s)
+        # ended: it found no call running (within a tick), and it is joined
+        function ended()
+            timedwait(() -> state() == (0, false), 5.0) === :ok || return false
+            lock(P._CLOCK_START) do
+                c.thread == 0 || @ccall gc_safe = true uv_thread_join(Ref(c.thread)::Ptr{UInt64})::Cint
+                c.thread = 0
+            end
+            true
+        end
+        @test ended()   # (an earlier test's)
+        @test WasmFilter(empty; timeout = 30)("{}", Conversion()) == UInt8[]
+        @test ended()
+        # started and ended many times, by tasks on every thread at once
+        for _ in 1:20
+            @sync for _ in 1:8
+                Threads.@spawn WasmFilter(empty; timeout = 30)("{}", Conversion())
+            end
+        end
+        @test ended()
+        # a time limit still fires on the first call after it ended
+        t = @elapsed e = try WasmFilter(loop; timeout = 0.5)("{}", Conversion()); nothing catch e; e end
+        @test e isa ErrorException && contains(e.msg, "its time limit") && t < 5
+        @test ended()
+        # and so does the directory sandbox's (timed with the module compiled)
+        P.convert("x"; sandbox = (read = String[], timeout = 0))
+        @test ended()
+        t = @elapsed e = try P.convert(">"^100_000; sandbox = (read = String[], timeout = 0.5)) catch e; e end
+        @test istimeout(e) && t < 10
+        @test ended()
+        # with no time limit, none starts
+        WasmFilter(empty; timeout = nothing)("{}", Conversion())
+        @test state() == (0, false) && c.thread == 0
+    end
 end
 
 @testset "pandocjl" begin
@@ -605,5 +679,6 @@ end
 end
 
 include("sandbox.jl")
+include("confined_reads.jl")
 
 end

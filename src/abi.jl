@@ -5,14 +5,14 @@
 
 A pandoc failure. `kind` is pandoc's error constructor, e.g.
 `"PandocParseError"` or `"PandocUnknownReaderError"`, `"Timeout"` for a
-call stopped by its time limit (the option `timeout`), or `"Exception"`;
+call stopped by its time limit ([`istimeout`](@ref)), or `"Exception"`;
 `message` is what the pandoc command would print.
 
 ```julia
 try
     Pandoc.convert(text; timeout = 5)
 catch e
-    e isa PandocError && e.kind == "Timeout" || rethrow()
+    istimeout(e) || rethrow()
     ...
 end
 ```
@@ -21,6 +21,16 @@ struct PandocError <: Exception
     kind::String
     message::String
 end
+
+"""
+    istimeout(e) -> Bool
+
+Whether `e` is a `PandocError` of a call stopped by its time limit (kind
+`"Timeout"`): the option `timeout`, or the directory sandbox's (`timeout`
+in it, or `\$LIBPANDOC_WASM_TIMEOUT`). As libpandoc-rs's
+`Error::is_timeout`.
+"""
+istimeout(e) = e isa PandocError && e.kind == "Timeout"
 
 Base.showerror(io::IO, e::PandocError) = print(io, e.kind, ": ", e.message)
 
@@ -204,7 +214,7 @@ end
 
 # What a filter threw, as the call throws it: a FilterError, but a time
 # limit's PandocError as it is (a script stopped as pandoc stops a JSON filter).
-_filter_error(e, bt) = e isa PandocError && e.kind == "Timeout" ? e : FilterError(e, bt)
+_filter_error(e, bt) = istimeout(e) ? e : FilterError(e, bt)
 
 # -- the calls -------------------------------------------------------------------------
 

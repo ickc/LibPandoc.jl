@@ -1,12 +1,14 @@
 # The API: convert, run, read, read_many, write, and pandoc's queries.
 
-# Options as pandoc's defaults-file keys: `_` for `-` in keyword names.
+# Options as pandoc's defaults-file keys: `_` for `-` in keyword names. A
+# value that is `nothing` is an absent option, as Lua's `nil` in a table: the
+# key is not there (a keyword `nothing` leaves the Dict's).
 _key(k) = replace(String(k), '_' => '-')
 
 function _options(options::AbstractDict, kw)
-    opts = Dict{String, Any}(String(k) => v for (k, v) in options)
+    opts = Dict{String, Any}(String(k) => v for (k, v) in options if v !== nothing)
     for (k, v) in kw
-        opts[_key(k)] = v
+        v === nothing || (opts[_key(k)] = v)
     end
     opts
 end
@@ -245,6 +247,9 @@ function read_many(texts, from::Union{Nothing, AbstractString, Conversion} = not
     else
         _format!(opts, from, ("from", "reader"), "markdown")
     end
+    get(opts, "sandbox", nothing) isa Union{AbstractDict, NamedTuple} &&
+        throw(PandocError("PandocOptionError", "read_many: a directory sandbox is for conversions " *
+                                               "(\"sandbox\": true reads no files)"))
     inputs = String[t isa AbstractVector{UInt8} ? String(copy(t)) : String(t) for t in texts]
     out = JSON.parse(String(_read_many(_json(Dict("options" => opts, "inputs" => inputs)))))
     docs = Any[]
@@ -268,8 +273,15 @@ const _READ_MANY_OPTIONS = ("from", "reader", "abbreviations", "data-dir", "defa
 
 # The conversion's options that also apply to reading a fragment of it.
 const _READ_OPTIONS = ("abbreviations", "data-dir", "default-image-extension", "indented-code-classes",
-                       "preserve-tabs", "resource-path", "sandbox", "strip-comments", "tab-stop",
-                       "track-changes")
+                       "resource-path", "strip-comments", "tab-stop", "track-changes")
+# Whether a conversion is sandboxed, for what a filter reads through it; with
+# no options, that can't be told: sandboxed, failing closed.
+function _sandboxed(c::Conversion)
+    c.options === nothing && return true
+    s = get(c.options, "sandbox", nothing)
+    !(s === nothing || s === false)
+end
+
 # Reader options (as pandoc gives filters) that have a defaults-file key.
 const _READER_OPTIONS = ("default-image-extension", "indented-code-classes", "strip-comments", "tab-stop")
 const _TRACK_CHANGES = Dict("accept-changes" => "accept", "reject-changes" => "reject", "all-changes" => "all")
@@ -280,6 +292,20 @@ const _TRACK_CHANGES = Dict("accept-changes" => "accept", "reject-changes" => "r
 Options (defaults-file keys) to read a fragment as `conversion` reads its
 input: its input format (or `format`), and the options that affect
 reading; not filters, templates, metadata or the output.
+
+When the conversion is sandboxed, or when that can't be told, a fragment
+is read in pandoc's own sandbox (`"sandbox" => true`: it reads no files,
+as LaTeX's `\\input` or an RST or Org include would). A conversion is
+sandboxed when its options' `"sandbox"` is `true` or a directory sandbox
+(whose filters run in this process, outside it); it can't be told for a
+conversion with no options: pandocjl's (pandoc doesn't tell its filters
+about `--sandbox`, on the command line or in a defaults file), a script's
+run as a subprocess (made from its environment), one made by hand. And
+the text is read as given, its tabs kept (`"preserve-tabs" => true`), as
+Lua's `pandoc.read` reads it: the `pandoc` command first replaces them by
+spaces. Options given to `read` or `read_many` beside the conversion win
+over these (`sandbox = false` reads files again, `preserve_tabs = false`
+expands tabs: the filter's author's choice).
 """
 function read_options(c::Conversion, format = nothing)
     opts = Dict{String, Any}()
@@ -295,9 +321,9 @@ function read_options(c::Conversion, format = nothing)
         tc = get(_TRACK_CHANGES, get(ro, "track-changes", ""), nothing)
         tc === nothing || (opts["track-changes"] = tc)
     end
-    # a directory sandbox's fragments are read in this process, so in
-    # pandoc's own sandbox: they read no files
-    haskey(opts, "sandbox") && !(opts["sandbox"] isa Bool) && (opts["sandbox"] = true)
+    delete!(opts, "sandbox")
+    _sandboxed(c) && (opts["sandbox"] = true)
+    opts["preserve-tabs"] = true
     given = something(c.options, Dict{String, Any}())
     opts["from"] = something(format, c.input_format, get(given, "from", nothing),
                              get(given, "reader", nothing), "markdown")

@@ -190,7 +190,6 @@ function (f::WasmFilter)(json::Union{AbstractString, AbstractVector{UInt8}}, c::
     w = _wasmtime()
     timeout = f.timeout === missing ? _parse_timeout(get(ENV, TIMEOUT_VAR, "")) : f.timeout
     max_memory = f.max_memory === missing ? _parse_memory(get(ENV, MAX_MEMORY_VAR, "")) : f.max_memory
-    timeout === nothing || _ticking(w)
     # the epoch's ticks: a huge limit is none in practice
     ticks = timeout === nothing ? _NO_DEADLINE : min(_NO_DEADLINE, ceil(timeout / _TICK) + 1)
     doc = _bytes(json)
@@ -223,55 +222,57 @@ function (f::WasmFilter)(json::Union{AbstractString, AbstractVector{UInt8}}, c::
     end
     store = GC.@preserve run @ccall libwasmtime.wasmtime_store_new(w.engine::Ptr{Cvoid},
         pointer_from_objref(run)::Ptr{Cvoid}, C_NULL::Ptr{Cvoid})::Ptr{Cvoid}
-    try
-        GC.@preserve run begin
-            ctx = @ccall libwasmtime.wasmtime_store_context(store::Ptr{Cvoid})::Ptr{Cvoid}
-            @ccall libwasmtime.wasmtime_store_limiter(store::Ptr{Cvoid}, something(max_memory, -1)::Int64,
-                                                      (-1)::Int64, (-1)::Int64, (-1)::Int64, (-1)::Int64)::Cvoid
-            @ccall libwasmtime.wasmtime_context_set_epoch_deadline(ctx::Ptr{Cvoid}, UInt64(ticks)::UInt64)::Cvoid
-            started = _now()
-            timeout === nothing || (run.deadline = started + timeout)
-            # a failure, with the limit it may have met
-            function failed(msg; interrupted = false)
-                interrupted && error("$(f.name): stopped after $(round(_now() - started; digits = 1)) s, " *
-                                     "its time limit ($TIMEOUT_VAR: $timeout)")
-                max_memory === nothing && error(msg)
-                error("$msg (its memory limit: $max_memory bytes, $MAX_MEMORY_VAR)")
-            end
-            _check((@ccall libwasmtime.wasmtime_context_set_wasi(ctx::Ptr{Cvoid}, wasi::Ptr{Cvoid})::Ptr{Cvoid}), f.name)
-            inst = Ref{NTuple{2, UInt64}}()
-            trap = Ref{Ptr{Cvoid}}(C_NULL)
-            err = @ccall libwasmtime.wasmtime_linker_instantiate(w.linker::Ptr{Cvoid}, ctx::Ptr{Cvoid}, f.mod::Ptr{Cvoid},
-                inst::Ptr{NTuple{2, UInt64}}, trap::Ptr{Ptr{Cvoid}})::Ptr{Cvoid}
-            _check(err, f.name)
-            trap[] == C_NULL || error("$(f.name): $(_trap_message(trap[]))")
-            ext = Ref{_Extern}()
-            found = @ccall libwasmtime.wasmtime_instance_export_get(ctx::Ptr{Cvoid}, inst::Ptr{NTuple{2, UInt64}},
-                "_start"::Cstring, 6::Csize_t, ext::Ptr{_Extern})::Bool
-            found && ext[].kind == _EXTERN_FUNC || error("$(f.name): not a WASI command (no _start)")
-            func = Ref(ext[].of[1:2])
-            err = @ccall gc_safe = true libwasmtime.wasmtime_func_call(ctx::Ptr{Cvoid}, func::Ptr{NTuple{2, UInt64}},
-                C_NULL::Ptr{Cvoid}, 0::Csize_t, C_NULL::Ptr{Cvoid}, 0::Csize_t, trap::Ptr{Ptr{Cvoid}})::Ptr{Cvoid}
-            msg, interrupted = nothing, false
-            if err != C_NULL
-                status = Ref{Cint}(0)
-                exited = @ccall libwasmtime.wasmtime_error_exit_status(err::Ptr{Cvoid}, status::Ptr{Cint})::Bool
-                msg = exited ? (status[] == 0 ? nothing : "$(f.name) exited with status $(status[])") :
-                      "$(f.name): $(_error_message(err))"
-                _error_delete(err)
-            end
-            if trap[] != C_NULL
-                code = Ref{UInt8}(0xff)
-                @ccall libwasmtime.wasmtime_trap_code(trap[]::Ptr{Cvoid}, code::Ptr{UInt8})::Bool
-                interrupted = timeout !== nothing && code[] == _TRAP_INTERRUPT
-                msg = "$(f.name): $(_trap_message(trap[]))"   # (which deletes the trap)
-            end
-            # its time ran out in a call to pandoc: stopped, whatever it did after
-            run.out_of_time && failed(""; interrupted = true)
-            # its output went past its limit (whether it noticed the failed write or not)
-            run.over === nothing || failed("$(f.name): its $(run.over) went past its memory limit")
-            msg === nothing || failed(msg; interrupted)
+    # (the clock, if it has a time limit, while it runs)
+    body() = GC.@preserve run begin
+        ctx = @ccall libwasmtime.wasmtime_store_context(store::Ptr{Cvoid})::Ptr{Cvoid}
+        @ccall libwasmtime.wasmtime_store_limiter(store::Ptr{Cvoid}, something(max_memory, -1)::Int64,
+                                                  (-1)::Int64, (-1)::Int64, (-1)::Int64, (-1)::Int64)::Cvoid
+        @ccall libwasmtime.wasmtime_context_set_epoch_deadline(ctx::Ptr{Cvoid}, UInt64(ticks)::UInt64)::Cvoid
+        started = _now()
+        timeout === nothing || (run.deadline = started + timeout)
+        # a failure, with the limit it may have met
+        function failed(msg; interrupted = false)
+            interrupted && error("$(f.name): stopped after $(round(_now() - started; digits = 1)) s, " *
+                                 "its time limit ($TIMEOUT_VAR: $timeout)")
+            max_memory === nothing && error(msg)
+            error("$msg (its memory limit: $max_memory bytes, $MAX_MEMORY_VAR)")
         end
+        _check((@ccall libwasmtime.wasmtime_context_set_wasi(ctx::Ptr{Cvoid}, wasi::Ptr{Cvoid})::Ptr{Cvoid}), f.name)
+        inst = Ref{NTuple{2, UInt64}}()
+        trap = Ref{Ptr{Cvoid}}(C_NULL)
+        err = @ccall libwasmtime.wasmtime_linker_instantiate(w.linker::Ptr{Cvoid}, ctx::Ptr{Cvoid}, f.mod::Ptr{Cvoid},
+            inst::Ptr{NTuple{2, UInt64}}, trap::Ptr{Ptr{Cvoid}})::Ptr{Cvoid}
+        _check(err, f.name)
+        trap[] == C_NULL || error("$(f.name): $(_trap_message(trap[]))")
+        ext = Ref{_Extern}()
+        found = @ccall libwasmtime.wasmtime_instance_export_get(ctx::Ptr{Cvoid}, inst::Ptr{NTuple{2, UInt64}},
+            "_start"::Cstring, 6::Csize_t, ext::Ptr{_Extern})::Bool
+        found && ext[].kind == _EXTERN_FUNC || error("$(f.name): not a WASI command (no _start)")
+        func = Ref(ext[].of[1:2])
+        err = @ccall gc_safe = true libwasmtime.wasmtime_func_call(ctx::Ptr{Cvoid}, func::Ptr{NTuple{2, UInt64}},
+            C_NULL::Ptr{Cvoid}, 0::Csize_t, C_NULL::Ptr{Cvoid}, 0::Csize_t, trap::Ptr{Ptr{Cvoid}})::Ptr{Cvoid}
+        msg, interrupted = nothing, false
+        if err != C_NULL
+            status = Ref{Cint}(0)
+            exited = @ccall libwasmtime.wasmtime_error_exit_status(err::Ptr{Cvoid}, status::Ptr{Cint})::Bool
+            msg = exited ? (status[] == 0 ? nothing : "$(f.name) exited with status $(status[])") :
+                  "$(f.name): $(_error_message(err))"
+            _error_delete(err)
+        end
+        if trap[] != C_NULL
+            code = Ref{UInt8}(0xff)
+            @ccall libwasmtime.wasmtime_trap_code(trap[]::Ptr{Cvoid}, code::Ptr{UInt8})::Bool
+            interrupted = timeout !== nothing && code[] == _TRAP_INTERRUPT
+            msg = "$(f.name): $(_trap_message(trap[]))"   # (which deletes the trap)
+        end
+        # its time ran out in a call to pandoc: stopped, whatever it did after
+        run.out_of_time && failed(""; interrupted = true)
+        # its output went past its limit (whether it noticed the failed write or not)
+        run.over === nothing || failed("$(f.name): its $(run.over) went past its memory limit")
+        msg === nothing || failed(msg; interrupted)
+    end
+    try
+        timeout === nothing ? body() : _with_clock(body, w)
     finally
         @ccall libwasmtime.wasmtime_store_delete(store::Ptr{Cvoid})::Cvoid
     end
@@ -485,17 +486,42 @@ function _parse_memory(s::AbstractString)
     n == 0 ? nothing : Int(min(n, typemax(Int)))   # (more than an Int holds: none in practice)
 end
 
-const _CLOCK = _Once{UInt64}()   # the clock thread's handle, once started
+# The epoch's clock: a thread of its own (not a task: a Julia thread may be
+# the one running the filter, the main one included), running while a call
+# with a time limit runs. The first such call starts it, and it ends within a
+# tick of the last: `users` counts the calls running, under a lock the thread
+# shares (it ends when it finds none, and says so in `alive`). The next start
+# joins the thread that ended before starting another (`thread`, its handle).
+mutable struct _Clock
+    const lock::Threads.SpinLock
+    users::Int
+    alive::Bool
+    thread::UInt64   # uv_thread_t: pthread_t, or a HANDLE on Windows; 0: none
+end
+const _CLOCK = _Clock(Threads.SpinLock(), 0, false, 0)
+const _CLOCK_START = ReentrantLock()   # (one start at a time: `thread` is theirs)
+
+# What an image holds of an earlier process (precompiling's, a system
+# image's): not this one's.
+function _clock_reset!()
+    _CLOCK.users, _CLOCK.alive, _CLOCK.thread = 0, false, 0
+end
 
 # The clock thread's loop: sleep (letting the GC run meanwhile), then advance
 # the epoch by the time that has passed, in _TICKs. By the time passed, not
 # by the sleeps: a system may stretch a short sleep (macOS does), and a
-# limit then comes late.
+# limit then comes late. It ends when no call with a time limit runs.
 function _clock(engine::Ptr{Cvoid})::Cvoid
+    c = _CLOCK
     tick = round(UInt64, 1e9 * _TICK)
     started, done = time_ns(), UInt64(0)
     while true
         @ccall gc_safe = true uv_sleep(round(Cuint, 1000 * _TICK)::Cuint)::Cvoid
+        lock(c.lock)
+        ending = c.users == 0
+        ending && (c.alive = false)
+        unlock(c.lock)
+        ending && return
         due = (time_ns() - started) ÷ tick
         for _ in (done + 1):due
             @ccall libwasmtime.wasmtime_engine_increment_epoch(engine::Ptr{Cvoid})::Cvoid
@@ -504,18 +530,41 @@ function _clock(engine::Ptr{Cvoid})::Cvoid
     end
 end
 
-# The epoch's clock: a thread of its own (not a task: a Julia thread may be
-# the one running the filter, the main one included), started by the first
-# filter with a timeout.
-function _ticking(w)
-    _CLOCK[] === nothing || return
-    lock(_WASMTIME_LOCK) do
-        _CLOCK[] === nothing || return
-        tid = Ref{UInt64}(0)   # uv_thread_t: pthread_t, or a HANDLE on Windows
+# `f()`, a call with a time limit: the clock runs meanwhile.
+function _with_clock(f, w)
+    c = _CLOCK
+    lock(_CLOCK_START) do
+        start = begin
+            lock(c.lock)
+            c.users += 1
+            s = !c.alive
+            c.alive = true
+            unlock(c.lock)
+            s
+        end
+        start || return
+        # the thread that ended (it found no call running), joined: its last
+        # step is to return
+        c.thread == 0 || @ccall gc_safe = true uv_thread_join(Ref(c.thread)::Ptr{UInt64})::Cint
+        c.thread = 0
+        tid = Ref{UInt64}(0)
         entry = @cfunction(_clock, Cvoid, (Ptr{Cvoid},))
         err = @ccall uv_thread_create(tid::Ptr{UInt64}, entry::Ptr{Cvoid}, w.engine::Ptr{Cvoid})::Cint
-        err == 0 || error("a thread for wasm filters' timeouts: libuv error $err")
-        _CLOCK[] = tid[]
+        if err != 0
+            lock(c.lock)
+            c.users -= 1
+            c.alive = false
+            unlock(c.lock)
+            error("a thread for wasm filters' timeouts: libuv error $err")
+        end
+        c.thread = tid[]
+    end
+    try
+        f()
+    finally
+        lock(c.lock)
+        c.users -= 1
+        unlock(c.lock)
     end
 end
 

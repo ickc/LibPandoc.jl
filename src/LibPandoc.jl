@@ -21,7 +21,8 @@ Pandoc.convert("hi"; to = "html", filters = [upper])      # "<p>HI</p>\\n"
   and this package's directory sandbox, `sandbox = (read = [...], write =
   [...])`: pandoc in libpandoc.wasm, seeing only those directories (the
   README's "Security"; `\$LIBPANDOC_SANDBOX` for `run` and pandocjl).
-  Failures throw `PandocError` (of kind `"Timeout"` past the time limit);
+  Failures throw `PandocError` (of kind `"Timeout"` past the time limit:
+  `istimeout(e)`);
   pandoc's warnings are logged (`@warn`).
 - **Filters** (`filters = [...]`), in order, all in one pandoc run:
   - a Julia function with methods for the nodes to change, walked as
@@ -53,7 +54,7 @@ using CodecZlib: GzipDecompressorStream
 import Wasmtime_jll
 using PrecompileTools: @setup_workload, @compile_workload
 
-export PandocError, FilterError, RawFilter, WasmFilter
+export PandocError, FilterError, RawFilter, WasmFilter, istimeout
 
 include("library.jl")
 include("abi.jl")
@@ -68,7 +69,7 @@ function __init__()
     # what precompiling (its workload) left in these would be stale
     _SYMS[] = nothing
     _WASMTIME[] = nothing
-    _CLOCK[] = nothing   # (an image's clock thread is not this process's)
+    _clock_reset!()   # (an image's clock thread is not this process's)
     _VERSION[] = nothing
     empty!(_SCRIPTS)
     empty!(_WASM_FILTERS)

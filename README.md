@@ -26,7 +26,10 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
 
 - **Options** are pandoc's [defaults-file](https://pandoc.org/MANUAL.html#defaults-files)
   keys, as keywords with `_` for `-` (`reference_doc = "ref.docx"`), or a
-  `Dict` (a keyword wins over the same key in it). `read`'s, `write`'s and
+  `Dict` (a keyword wins over the same key in it). A value that is
+  `nothing` is an absent option, as Lua's `nil` in a table (`timeout =
+  nothing`: no time limit; in a sandbox, `timeout = nothing`: the
+  environment's); a vector with `nothing` in it is an error. `read`'s, `write`'s and
   `read_many`'s format is an argument or the option (`from`/`reader`,
   `to`/`writer`), not both; an option a function has no use for (`read`'s
   `to`, `write`'s `from`, `read_many`'s `filters`, ...) is an
@@ -43,7 +46,8 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
   **warnings** are logged with `@warn`, `read_many`'s readers' too.
 - **Time limit:** `timeout = seconds` (libpandoc's option, for `convert`,
   `read`, `write`, `read_many`) stops a call still running after that
-  long, a `PandocError` of kind `"Timeout"`; the process goes on. It stops
+  long, a `PandocError` of kind `"Timeout"` (`istimeout(e)`, as
+  libpandoc-rs's `is_timeout()`); the process goes on. It stops
   pandoc's own code, JSON filters and Julia scripts run as a subprocess,
   not code in this process (a Julia
   filter runs to its end, and the call fails when it returns) nor Lua
@@ -95,6 +99,25 @@ cells(b::CodeBlock, ctx) = "cells" in b.attr.classes ?
     reduce(vcat, (d.blocks for d in Pandoc.read_many(split(b.text, '\n'), ctx.conversion))) : nothing
 ```
 
+Read so, a text keeps its tabs, as Lua's `pandoc.read` reads it; the
+`pandoc` command first replaces them by spaces (`preserve_tabs = false`
+does). A call each costs about 0.3 ms, six times `pandoc.read`'s: batch
+them. amsthm's 738 notes take 0.23 s read one by one and 0.012 s in one
+`read_many`.
+
+**Confined when the conversion is.** Document text read this way may name
+files (LaTeX's `\input`, RST's and Org's includes). When the conversion
+the filter runs in is sandboxed, by pandoc's sandbox (`sandbox = true`) or
+a directory sandbox (`sandbox = (read = [...],)`, `LIBPANDOC_SANDBOX`), the
+fragments are read in pandoc's own sandbox: they read no files, not even in
+the directories listed (the filter runs in this process, outside them). So
+they are too when that can't be told: for a conversion with no options, as
+`pandocjl`'s filters get (pandoc doesn't tell them about `--sandbox`, on
+the command line or in a defaults file) and a script run as a subprocess
+makes from its environment (`Conversion(ARGS, ENV)`). A filter that wants
+the files read gives its own options, `read(text, ctx.conversion; sandbox
+= false)`: its code, its choice.
+
 It calls pandoc from its own task. A filter that waits for a conversion
 with Julia filters started in another task (`@async`, `Threads.@spawn`
 when it lands on the same thread) waits forever: pandoc returns to the
@@ -103,6 +126,12 @@ for the one running the filter to return, and that one for it.
 
 What a Julia filter throws fails the conversion, and is thrown as a
 `FilterError` holding the exception and where it was thrown.
+
+Every filter but a Lua one is handed the whole document as pandoc's JSON
+and hands it back, whatever it changes: on a 9.4 MB textbook one that does
+next to nothing adds about 0.35 s (a Lua filter, given elements as it asks
+for them, 0.09 s); pandoc's own encoding and decoding of the JSON is most
+of it. Consecutive Julia filters share one exchange.
 
 ## pandocjl
 
@@ -131,17 +160,27 @@ pandocjl -F other-filter input.md              # anything else: as pandoc does
   filter over, is not run again as a subprocess (its side effects would
   happen twice): the conversion fails (`LibPandoc.ScriptFailed`), naming
   those two ways. A script's globals persist between the documents of one
-  process, and so do its changes to `ENV`, the packages it loads and the
-  tasks it starts: it runs with all your rights, as any filter but a wasm
-  one. Its `cd` is undone when it returns, so the output goes where it was
+  process (it is loaded once: `pandocjl` converts one document,
+  `LibPandoc.convert` may convert many), as do its changes to `ENV`, the
+  packages it loads and the tasks it starts: it runs with all your rights,
+  as any filter but a wasm one. Reset what it counts for each document
+  where the walk meets `Pandoc` first (`run_filter(f; traverse =
+  :topdown)`); libpandoc-python runs a Python script afresh for each
+  document instead. Its `cd` is undone when it returns, so the output goes where it was
   named.
 - **A wasm filter** (`-F name.wasm`): a pandoc JSON filter built for WASI
   (`wasm32-wasip1`), such as any [panir](https://github.com/ickc/panir) Rust
   filter; see [libpandoc-rs](https://github.com/ickc/libpandoc-rs). It runs
   in wasmtime, sandboxed: it sees the current directory, read-only, and no
-  network. It may call pandoc (libpandoc-rs's `libpandoc` crate built for
+  network; nothing on the command line names more (`WasmFilter(path;
+  dirs)` does), so an include through `..`, or through a link leaving the
+  directory, is a missing file (in the directory sandbox it sees the
+  mounts instead); of the environment, only the variables pandoc gives
+  filters. It may call pandoc (libpandoc-rs's `libpandoc` crate built for
   wasm): in pandoc's sandbox, with options that name no files (libpandoc
-  checks them, `"untrusted"`: the same for every host). Limits, which
+  checks them, `"untrusted"`: the same for every host), so the calls read
+  no file, not even one the filter can read itself (citeproc takes the
+  metadata's inline `references`, not a `bibliography` file). Limits, which
   pandoc has for no filter: `$LIBPANDOC_WASM_TIMEOUT` (seconds, as
   pandoc-server's `--timeout`; its calls to pandoc included: each runs
   with the time the filter has left as its `"timeout"`) and
@@ -247,7 +286,8 @@ command line: they run in this process as they do without the sandbox,
 called back by the module, unconfined. Wasm filters run in this process
 too, seeing the same mounts. `pandocjl lua` and `pandoc server` are not in
 the module (status 4). A filter that reads fragments with
-`read(text, ctx.conversion)` reads them in pandoc's own sandbox: no files.
+`read(text, ctx.conversion)` or `read_many` reads them in pandoc's own
+sandbox: no files, not even in the directories listed ("Filters").
 `read_many` reads in this process: a directory sandbox there is an error.
 
 **Limits.** `$LIBPANDOC_WASM_TIMEOUT` (seconds) and
@@ -288,6 +328,10 @@ in parallel.
   two apart where pandoc shows the error (an input file, an AsciiDoc or
   Typst include), though it reads nothing. A template, CSS or bibliography
   reads as missing either way.
+- In WASI an empty file name is the working directory: a Lua filter's
+  `io.open("")` opens it, where natively it is a missing file, and reading
+  it then fails (include-code-files' `include=""` fails the conversion
+  inside, where natively it is an empty block); a wasm filter's likewise.
 - PDF output needs a program and fails, saying so: write LaTeX, HTML or
   Typst and make the PDF outside.
 - `pandocjl --version` says what runs: the module's pandoc

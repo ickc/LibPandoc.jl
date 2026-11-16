@@ -37,7 +37,7 @@ const _EXTERN_MEMORY = 0x03
 const _WASM_I32 = 0x00
 
 function _vec_string(v::Ref{_Vec})
-    s = v[].size == 0 ? "" : unsafe_string(v[].data, v[].size)
+    s = v[].size == 0 ? "" : unsafe_string(v[].data, v[].size)   # (wasmtime's vector, copied, then deleted)
     @ccall libwasmtime.wasm_byte_vec_delete(v::Ptr{_Vec})::Cvoid
     rstrip(s, '\0')
 end
@@ -278,10 +278,14 @@ end
 
 # -- the libpandoc imports -------------------------------------------------------------
 
+# (the store's data: the _WasmRun the run keeps alive, GC.@preserve)
 _run(caller) = unsafe_pointer_to_objref(@ccall libwasmtime.wasmtime_context_get_data(
     (@ccall libwasmtime.wasmtime_caller_context(caller::Ptr{Cvoid})::Ptr{Cvoid})::Ptr{Cvoid})::Ptr{Cvoid})::_WasmRun
 
-_arg(args::Ptr{UInt64}, i) = unsafe_load(Ptr{Int32}(args + 16 * (i - 1)))  # wasmtime_val_raw_t: 16 bytes
+# A host function's arguments and result: wasmtime's array of
+# wasmtime_val_raw_t (16 bytes each), as long as the function type says
+# (the linker checked the filter's import against it), valid during the call.
+_arg(args::Ptr{UInt64}, i) = unsafe_load(Ptr{Int32}(args + 16 * (i - 1)))
 _ret!(args::Ptr{UInt64}, v) = unsafe_store!(Ptr{Int32}(args), Int32(v))
 
 # The filter's memory: its address and size, now (it may grow when the filter runs).
@@ -300,7 +304,7 @@ function _guest_bytes(caller, ptr::Int32, len::Int32)
     data, size = _memory(caller)
     p, n = reinterpret(UInt32, ptr), reinterpret(UInt32, len)
     UInt64(p) + n <= size || error("out of bounds memory access")
-    copy(unsafe_wrap(Vector{UInt8}, data + p, n))
+    copy(unsafe_wrap(Vector{UInt8}, data + p, n))   # (checked within the memory just above; copied)
 end
 
 # A host function's body: a trap for what it throws (nothing may unwind
@@ -418,7 +422,7 @@ function _import_result_read(env::Ptr{Cvoid}, caller::Ptr{Cvoid}, args::Ptr{UInt
         data, size = _memory(caller)
         to = reinterpret(UInt32, _arg(args, 2))
         UInt64(to) + length(b) <= size || error("out of bounds memory access")
-        GC.@preserve b unsafe_copyto!(data + to, pointer(b), length(b))
+        GC.@preserve b unsafe_copyto!(data + to, pointer(b), length(b))   # (checked just above)
     end
 end
 

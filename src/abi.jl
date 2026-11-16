@@ -33,12 +33,15 @@ struct _Result
     log::Ptr{UInt8}
 end
 
+# (a pandoc_result's strings: NUL-terminated, valid until it is freed)
 _str(p::Ptr{UInt8}) = p == C_NULL ? "" : unsafe_string(p)
 
 # A pandoc_result's parts (it is freed): status, output, error kind and
 # message, log.
 function _parts(p::Ptr{_Result})
     p == C_NULL && throw(OutOfMemoryError())
+    # (p: libpandoc's, not NULL, laid out as _Result; its output is
+    # output_len bytes, copied before it is freed below)
     r = unsafe_load(p)
     out = r.status == 0 ? copy(unsafe_wrap(Vector{UInt8}, r.output, r.output_len)) : UInt8[]
     kind, msg, log = _str(r.error_kind), _str(r.error_message), _str(r.log)
@@ -129,6 +132,8 @@ _Callback(run) = _Callback(run, nothing)
 
 function _callback_entry(ud::Ptr{Cvoid}, doc::Ptr{UInt8}, doc_len::Csize_t,
                          ctx::Ptr{UInt8}, ctx_len::Csize_t, out::Ptr{Cvoid})::Cint
+    # (ud: a _Callback _with_callbacks keeps alive for the call; doc and
+    # ctx: libpandoc's, valid during this callback, copied here)
     cb = unsafe_pointer_to_objref(ud)::_Callback
     try
         d = unsafe_string(doc, doc_len)

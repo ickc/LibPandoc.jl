@@ -15,7 +15,7 @@ const EMPTY_WASM = P._EMPTY_WASM   # a WASI command doing nothing
 function wat(text::String)
     v = Ref(P._Vec(0, C_NULL))
     P._check((@ccall P.libwasmtime.wasmtime_wat2wasm(text::Ptr{UInt8}, sizeof(text)::Csize_t, v::Ptr{P._Vec})::Ptr{Cvoid}), "wat")
-    bytes = copy(unsafe_wrap(Vector{UInt8}, v[].data, v[].size))
+    bytes = copy(unsafe_wrap(Vector{UInt8}, v[].data, v[].size))   # (wasmtime's vector, copied, then deleted)
     @ccall P.libwasmtime.wasm_byte_vec_delete(v::Ptr{P._Vec})::Cvoid
     bytes
 end

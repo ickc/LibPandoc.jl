@@ -10,9 +10,16 @@
 # Scripts that don't use `run_filter` (reading and writing the JSON
 # themselves) run as a subprocess, with this Julia and its load path, since
 # Julia's standard streams belong to the process, not to a task. So do
-# scripts that say so (`# pandocjl: subprocess`), that the user names in
-# `$PANDOCJL_SUBPROCESS` (paths, file names, names without `.jl`, or `*`),
-# and, with a warning, those that fail to load.
+# scripts that say so (`# pandocjl: subprocess`) and those the user names in
+# `$PANDOCJL_SUBPROCESS` (paths, file names, names without `.jl`, or `*`).
+# A script that fails to load in process, or hands no filter over, is not
+# run again as a subprocess (its side effects would happen twice): the
+# conversion fails, saying how to opt out.
+#
+# A script runs in this process with all its rights: what it changes in
+# `ENV`, the modules it loads and the tasks it starts stay. Its working
+# directory is restored when it returns, so that pandoc writes the output
+# where it was named.
 
 const SUBPROCESS_ENV = "PANDOCJL_SUBPROCESS"
 const _MARKER = r"^#\s*pandocjl:\s*subprocess\b"m
@@ -65,19 +72,47 @@ function _load_script(path)
     end
 end
 
+"""
+    ScriptFailed(path, exception, backtrace)
+
+A Julia filter script that failed to load in process (`exception` is
+`nothing` when it ran but handed no filter over). It is not run again as a
+subprocess: the message says how to have it run so.
+"""
+struct ScriptFailed <: Exception
+    path::String
+    exception::Any
+    backtrace::Any
+end
+
+function Base.showerror(io::IO, e::ScriptFailed)
+    print(io, e.path, e.exception === nothing ? " called no run_filter in process" : " failed in process",
+          ". If it needs a process of its own, add the line `# pandocjl: subprocess` to it, ",
+          "or set $SUBPROCESS_ENV=", basename(e.path))
+    e.exception === nothing || (print(io, ":\n"); showerror(io, e.exception, e.backtrace))
+end
+
+# `f()`, then back in the working directory it started in: a script's `cd`
+# stays its own.
+function _in_dir(f)
+    dir = pwd()
+    try
+        f()
+    finally
+        pwd() == dir || cd(dir)
+    end
+end
+
 function _include_script(path)
     m = Module(Symbol("filter:", basename(path)))
     # as `julia path` would have it: a module where `include` is relative to it
     Core.eval(m, :(include(x) = Base.include($m, x)))
     handed = try
-        Panir.handoff(() -> Base.include(m, path))
+        _in_dir(() -> Panir.handoff(() -> Base.include(m, path)))
     catch e
-        @warn "$path failed to load in process; running it as a subprocess. If it needs a " *
-              "process of its own, add the line `# pandocjl: subprocess` to it, or set " *
-              "$SUBPROCESS_ENV=$(basename(path))." exception = (e, catch_backtrace())
-        return nothing
+        throw(ScriptFailed(path, e, catch_backtrace()))
     end
-    handed === nothing && (@warn "$path called no run_filter in process; running it as a subprocess"; return nothing)
+    handed === nothing && throw(ScriptFailed(path, nothing, nothing))
     f, traverse = handed
     Pair{Any, Symbol}(f, traverse)
 end
@@ -86,9 +121,10 @@ end
 # a subprocess.
 function _script(path, name, @nospecialize(options))
     f = _load_script(path)
-    f === nothing || return f.first isa RawFilter ? _raw(f.first, options) :
-                            f.first isa WasmFilter ? _raw(RawFilter(f.first), options) : _walks([f], options)
-    (json, context) -> _subprocess(path, json, context)
+    f === nothing && return (json, context) -> _subprocess(path, json, context)
+    run = f.first isa RawFilter ? _raw(f.first, options) :
+          f.first isa WasmFilter ? _raw(RawFilter(f.first), options) : _walks([f], options)
+    (json, context) -> _in_dir(() -> run(json, context))
 end
 
 "As libpandoc runs a JSON filter (its variables), with this Julia and its load path."

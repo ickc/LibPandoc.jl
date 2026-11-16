@@ -331,6 +331,28 @@ end
         Base.write(td, "using Panir\nseen = String[]\nf(x::Union{Para, Str}) = (push!(seen, string(nameof(typeof(x)))); nothing)\n" *
                        "f(d::Panir.Pandoc) = (push!(d.blocks, Para(join(seen, \",\"))); nothing)\nrun_filter(f; traverse = :bottomup)")
         @test P.convert("a"; to = "plain", filters = [td]) |> contains("Str,Para")
+        # a script that fails in process is not run again (as a subprocess):
+        # its side effects once, its error with the ways to opt out
+        log = joinpath(d, "side.log")
+        fails = joinpath(d, "fails.jl")
+        Base.write(fails, "using Panir\nopen(io -> println(io, \"ran\"), $(repr(log)), \"a\")\nerror(\"my bug\")\nrun_filter(s::Str -> s)")
+        e = try P.convert("x"; to = "plain", filters = [fails]) catch e; e end
+        msg = sprint(showerror, e)
+        @test contains(msg, "my bug") && contains(msg, "# pandocjl: subprocess") && contains(msg, "PANDOCJL_SUBPROCESS")
+        @test readlines(log) == ["ran"]
+        # nor one that hands no filter over in process
+        none = joinpath(d, "none.jl")
+        Base.write(none, "# run_filter, someday\nopen(io -> println(io, \"none\"), $(repr(log)), \"a\")")
+        @test_throws Exception P.convert("x"; to = "plain", filters = [none])
+        @test readlines(log) == ["ran", "none"]
+        # a script's cd stays its own: pandoc writes the output where it was named
+        away = mkpath(joinpath(d, "away"))
+        cdf = joinpath(d, "cd.jl")
+        Base.write(cdf, "using Panir\ncd($(repr(away)))\nrun_filter(s::Str -> (cd($(repr(away))); nothing))")
+        cd(d) do
+            P.convert("x"; to = "plain", output_file = "out.txt", filters = [cdf])
+            @test samefile(pwd(), d) && isfile(joinpath(d, "out.txt")) && !isfile(joinpath(away, "out.txt"))
+        end
     end
 end
 

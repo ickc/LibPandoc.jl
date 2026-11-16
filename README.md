@@ -118,10 +118,16 @@ pandocjl -F other-filter input.md              # anything else: as pandoc does
   of its own, once per process (again if it changes), and its
   `run_filter` hands `f` over: it runs on the document directly. Scripts
   that read the JSON themselves run as a subprocess, with this Julia and
-  its load path; so do scripts with a line `# pandocjl: subprocess`, those
-  named in `$PANDOCJL_SUBPROCESS` (paths, file names, names without `.jl`,
-  or `*`), and, with a warning, those that fail to load. A script's
-  globals persist between the documents of one process.
+  its load path; so do scripts with a line `# pandocjl: subprocess` and
+  those named in `$PANDOCJL_SUBPROCESS` (paths, file names, names without
+  `.jl`, or `*`). A script that fails to load in process, or hands no
+  filter over, is not run again as a subprocess (its side effects would
+  happen twice): the conversion fails (`LibPandoc.ScriptFailed`), naming
+  those two ways. A script's globals persist between the documents of one
+  process, and so do its changes to `ENV`, the packages it loads and the
+  tasks it starts: it runs with all your rights, as any filter but a wasm
+  one. Its `cd` is undone when it returns, so the output goes where it was
+  named.
 - **A wasm filter** (`-F name.wasm`): a pandoc JSON filter built for WASI
   (`wasm32-wasip1`), such as any [panir](https://github.com/ickc/panir) Rust
   filter; see [libpandoc-rs](https://github.com/ickc/libpandoc-rs). It runs

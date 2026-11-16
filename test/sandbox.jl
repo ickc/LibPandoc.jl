@@ -883,6 +883,20 @@ else
         @test status == 0 && count("Some words here.", out) == 20_000
     end
 
+    if !Sys.iswindows()
+        @testset "pandocjl: a writer and a reader slower than it" begin
+            # Julia's libuv makes its standard pipes non-blocking, WASI's
+            # inherited streams aren't made for that ("hardware fault" as soon
+            # as a pipe was empty or full): blocking while the module runs
+            Base.write(joinpath(lab.work, "big.md"), "Some *words* here.\n\n"^20_000)
+            jl = Base.shell_escape(`$(Base.julia_cmd()) --startup-file=no --project=$PROJECT -m LibPandoc -f markdown -t plain`)
+            out = withenv(HERE...) do
+                cd(() -> Base.read(`sh -c "(sleep 2; cat big.md) | $jl | (sleep 3; cat)"`, String), lab.work)
+            end
+            @test count("Some words here.", out) == 20_000
+        end
+    end
+
     @testset "run with the variables" begin
         withenv(HERE...) do
             @test String(P.run(["-f", "latex", "-t", "plain"]; input = "\\input{inside} \\input{../secret/secret}")) |> strip == "INSIDE-OK"

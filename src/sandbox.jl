@@ -452,7 +452,7 @@ function _sandbox_run(m::_Mounts, dirs::_Dirs, call, input, cbs::Vector{_Callbac
     result = try
         # (the store's data alive meanwhile; the task on this thread, and
         # alone in wasm on it with callbacks: above, "Threads")
-        GC.@preserve run _pinned(body)
+        GC.@preserve run _blocking(() -> _pinned(body))
     catch e
         e isa _Stopped || rethrow()
         throw(_stopped(e, dirs, timeout, max_memory, started))
@@ -513,6 +513,39 @@ function _call_in(ctx, inst, call, input, m, n)
     kind, log = text(w[4]), text(w[6])
     reinterpret(Int32, w[1]), w[1] == 0 ? _peek(ctx, mem, w[2], w[3]) : UInt8[],
         isempty(kind) ? "Exception" : kind, text(w[5]), isempty(log) ? "[]" : log
+end
+
+# Julia's libuv puts the standard streams that are pipes in non-blocking
+# mode (uv_pipe_open does), which GHC's runtime handles natively and WASI's
+# inherited streams do not: pandoc failed with "hardware fault" (EAGAIN) as
+# soon as a pipe was empty or full. So they are blocking while the module
+# runs, as for any other program, and as they were once no module runs.
+# (Windows: no such mode.)
+const _O_NONBLOCK = Sys.isapple() || Sys.isbsd() ? Cint(0x0004) : Cint(0x0800)
+const _STD_LOCK = ReentrantLock()
+const _STD_FLAGS = Cint[]   # the streams' flags before, while runs go on
+
+function _blocking(f)
+    Sys.iswindows() && return f()
+    lock(_STD_LOCK) do
+        isempty(_STD_FLAGS) || return push!(_STD_FLAGS, -1)   # (one more run)
+        for fd in 0:2
+            flags = @ccall fcntl(fd::Cint, 3::Cint)::Cint   # F_GETFL
+            flags >= 0 && @ccall fcntl(fd::Cint, 4::Cint; (flags & ~_O_NONBLOCK)::Cint)::Cint   # F_SETFL
+            push!(_STD_FLAGS, flags)
+        end
+    end
+    try
+        f()
+    finally
+        lock(_STD_LOCK) do
+            length(_STD_FLAGS) > 3 && return pop!(_STD_FLAGS)
+            for (fd, flags) in zip(0:2, _STD_FLAGS)
+                flags >= 0 && @ccall fcntl(fd::Cint, 4::Cint; flags::Cint)::Cint
+            end
+            empty!(_STD_FLAGS)
+        end
+    end
 end
 
 # -- the entry points -----------------------------------------------------------------

@@ -363,6 +363,18 @@ end
         Base.write(wsub, "# pandocjl: subprocess\n" * Base.read(wo, String))
         @test P.convert("x"; to = "plain", number_sections = true, filters = [wsub]) == "x\n\ntrue\n"
         @test P._SCRIPTS[abspath(wsub)].filter === nothing
+        # loaded again when changed with its time kept (cp -p, tar, a coarse
+        # clock): the size and inode tell too
+        if !Sys.iswindows()
+            same = joinpath(d, "same.jl")
+            Base.write(same, "using Panir\nrun_filter(s::Str -> Str(\"one\"))")
+            @test P.convert("x"; to = "plain", filters = [same]) == "one\n"
+            Base.run(`touch -r $same $(same).time`)
+            Base.write(same * ".new", "using Panir\nrun_filter(s::Str -> Str(\"second\"))")
+            mv(same * ".new", same; force = true)
+            Base.run(`touch -r $(same).time $same`)
+            @test P.convert("x"; to = "plain", filters = [same]) == "second\n"
+        end
         # a script's traverse
         td = joinpath(d, "td.jl")
         Base.write(td, "using Panir\nseen = String[]\nf(x::Union{Para, Str}) = (push!(seen, string(nameof(typeof(x)))); nothing)\n" *

@@ -49,7 +49,7 @@ function _subprocess_reason(path, source)
 end
 
 struct _Loaded
-    mtime::Float64
+    version::Tuple
     filter::Union{Nothing, Pair{Any, Symbol}}   # nothing: a subprocess
 end
 
@@ -60,10 +60,10 @@ const _SCRIPTS_LOCK = ReentrantLock()
 # it runs as a subprocess.
 function _load_script(path)
     key = abspath(path)
-    t = mtime(key)
+    t = _file_version(key)
     lock(_SCRIPTS_LOCK) do
         l = get(_SCRIPTS, key, nothing)
-        l !== nothing && l.mtime == t && return l.filter
+        l !== nothing && l.version == t && return l.filter
         source = Base.read(key, String)
         why = _subprocess_reason(path, source)
         f = why === nothing ? _include_script(key) : nothing

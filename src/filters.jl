@@ -156,12 +156,17 @@ function _package_filter(name::AbstractString)
     Base.invokelatest(getproperty, m, :pandoc_filter)
 end
 
-const _WASM_FILTERS = Dict{String, Tuple{Float64, WasmFilter}}()
+const _WASM_FILTERS = Dict{String, Tuple{Tuple, WasmFilter}}()
 const _WASM_LOCK = ReentrantLock()
+
+# What tells that a file changed: its modification time, size and inode (a
+# file replaced within the time's resolution, or with the same time, is
+# another file).
+_file_version(path) = (s = stat(path); (s.mtime, s.size, s.inode))
 
 # A wasm filter by path, compiled once per process (again if the file changes).
 function _wasm_filter(path)
-    key, t = abspath(path), mtime(path)
+    key, t = abspath(path), _file_version(path)
     lock(_WASM_LOCK) do
         c = get(_WASM_FILTERS, key, nothing)
         c !== nothing && c[1] == t && return c[2]

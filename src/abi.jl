@@ -217,11 +217,19 @@ function _convert(options::AbstractString, input, cbs::Vector{_Callback} = _Call
     end
 end
 
+# Arguments for C, NUL-terminated (as Julia's strings are underneath): one
+# with a NUL in it would end there, so it is refused.
+function _argv(args)
+    argv = String[a for a in args]
+    any(a -> occursin('\0', a), argv) && throw(ArgumentError("an argument with a NUL in it: $(repr(first(filter(a -> occursin('\0', a), argv))))"))
+    argv
+end
+
 function _convert_args(args::AbstractVector{<:AbstractString}, input)
     s = _load()
     inp = _bytes(input)
     inptr, inlen = inp === nothing ? (C_NULL, 0) : (pointer(inp), length(inp))
-    argv = String.(args)
+    argv = _argv(args)
     ptrs = map(pointer, argv)
     GC.@preserve argv ptrs inp _take(
         @ccall gc_safe = true $(s.convert_args)(length(argv)::Cint, ptrs::Ptr{Ptr{UInt8}},
@@ -240,6 +248,7 @@ end
 
 # pandoc_main: the exit status.
 function _pandoc_main(argv::Vector{String}, filters_json::Union{Nothing, String}, cbs::Vector{_Callback})
+    argv = _argv(argv)
     s = _load()
     fj = filters_json === nothing ? C_NULL : pointer(filters_json)
     fjlen = filters_json === nothing ? 0 : sizeof(filters_json)

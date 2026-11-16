@@ -174,6 +174,9 @@ end
 @testset "run" begin
     @test String(P.run(["-f", "markdown", "-t", "latex"]; input = "*hi*")) == "\\emph{hi}\n"
     @test_throws PandocError P.run(["--version"])
+    # a NUL would end the argument there (writing "out" for "out\0.html")
+    @test_throws ArgumentError P.run(["-o", "out\0.html"]; input = "x")
+    @test_throws ArgumentError P.main(["-o", "out\0.html"])
 end
 
 @testset "queries" begin

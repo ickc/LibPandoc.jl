@@ -46,7 +46,8 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
   **warnings** are logged with `@warn`, `read_many`'s readers' too.
 - **Time limit:** `timeout = seconds` (libpandoc's option, for `convert`,
   `read`, `write`, `read_many`) stops a call still running after that
-  long, a `PandocError` of kind `"Timeout"`; the process goes on. It stops
+  long, a `PandocError` of kind `"Timeout"` (`istimeout(e)`, as
+  libpandoc-rs's `is_timeout()`); the process goes on. It stops
   pandoc's own code, JSON filters and Julia scripts run as a subprocess,
   not code in this process (a Julia
   filter runs to its end, and the call fails when it returns) nor Lua

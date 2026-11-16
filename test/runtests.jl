@@ -44,6 +44,57 @@ demote(h::Header) = (h.level += 1; nothing)
     @test P.convert(codeunits("*b*"); to = "plain") == "b\n"
 end
 
+@testset "the format, however it is given" begin
+    tex = "\\emph{x}"
+    emph(d) = d.blocks[1].content[1] isa Emph
+    # as an argument, a keyword, under pandoc's other name
+    @test emph(P.read(tex, "latex")) && emph(P.read(tex; from = "latex")) && emph(P.read(tex; reader = "latex"))
+    @test all(emph, P.read_many([tex], "latex")) && all(emph, P.read_many([tex]; from = "latex")) &&
+          all(emph, P.read_many([tex]; reader = "latex"))
+    doc = P.read("*x*")
+    @test P.write(doc, "rst") == P.write(doc; to = "rst") == P.write(doc; writer = "rst") == "*x*\n"
+    @test emph(P.read(tex)) == false && P.write(doc) == "<p><em>x</em></p>\n"   # the defaults
+    # given twice: refused, whichever would have won
+    @test_throws ArgumentError P.read(tex, "latex"; from = "html")
+    @test_throws ArgumentError P.read(tex; from = "latex", reader = "html")
+    @test_throws ArgumentError P.write(doc, "rst"; to = "html")
+    @test_throws ArgumentError P.read_many([tex], "latex"; from = "html")
+    # with a conversion, the options may name another format
+    @test emph(only(P.read_many([tex], Conversion(; input_format = "html"); from = "latex")))
+end
+
+@testset "arguments a function can't apply: refused, not ignored" begin
+    doc = P.read("*x*")
+    @test_throws ArgumentError P.read("x"; to = "rst")
+    @test_throws ArgumentError P.read("x"; output_file = "o.html")
+    @test_throws ArgumentError P.write(doc; from = "latex")
+    @test_throws ArgumentError P.write(doc; input_files = ["a.md"])
+    @test_throws ArgumentError P.read_many(["a"]; standalone = true)
+    @test_throws ArgumentError P.read_many(["a"]; filters = ["x.lua"])
+    @test length(P.read_many(["a"]; tab_stop = 2, sandbox = true, timeout = 30, untrusted = true)) == 1
+    @test_throws ArgumentError P.read_many("abc")             # a text, not texts
+    @test_throws ArgumentError P.convert("a"; filters = "x.lua")   # a filter, not filters
+    # read converts as convert does: Julia filters too
+    @test Panir.stringify(P.read("a"; filters = [upper])) == "A"
+    # bytes for a binary format under pandoc's other name too
+    @test P.convert("# R"; writer = "docx") isa Vector{UInt8}
+    # no output file: the output
+    @test P.convert("x"; to = "plain", output_file = nothing) == "x\n"
+    @test P.convert("x"; to = "plain", output_file = "-") == "x\n"
+end
+
+@testset "no input: refused, not this process's standard input" begin
+    # pandoc would read it and close it: Julia's stdin then reads another file
+    code = """
+        import LibPandoc as P
+        for f in (() -> P.convert(; to = "plain"), () -> P.read(nothing))
+            try f(); print("read it") catch e; e isa ArgumentError || rethrow() end
+        end
+        print(read(stdin, String))"""
+    out = Base.read(pipeline(`$(Base.julia_cmd()) --startup-file=no --project=$PROJECT -e $code`; stdin = IOBuffer("still here")), String)
+    @test out == "still here"
+end
+
 @testset "errors and warnings" begin
     e = try P.convert("x"; from = "nonesuch") catch e; e end
     @test e isa PandocError && e.kind == "PandocUnknownReaderError"

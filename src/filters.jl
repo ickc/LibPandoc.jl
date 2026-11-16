@@ -71,6 +71,8 @@ The callbacks for the filters that run in this process, and pandoc's
 `packages`: a JSON filter's name may be a Julia package's (pandocjl).
 """
 function _plan(@nospecialize(filters), @nospecialize(options); packages::Bool = false, args = String[])
+    filters isa Union{AbstractVector, Tuple} ||
+        throw(ArgumentError("filters: a vector of filters, not $(repr(filters)): filters = [f]"))
     cbs = _Callback[]
     entries = Any[]
     group = Pair{Any, Symbol}[]

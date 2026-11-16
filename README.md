@@ -26,8 +26,14 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
 
 - **Options** are pandoc's [defaults-file](https://pandoc.org/MANUAL.html#defaults-files)
   keys, as keywords with `_` for `-` (`reference_doc = "ref.docx"`), or a
-  `Dict`. `run` takes command-line arguments, parsed by pandoc itself.
-  The output is a `String` for text formats and bytes for binary ones.
+  `Dict` (a keyword wins over the same key in it). `read`'s, `write`'s and
+  `read_many`'s format is an argument or the option (`from`/`reader`,
+  `to`/`writer`), not both; an option a function has no use for (`read`'s
+  `to`, `write`'s `from`, `read_many`'s `filters`, ...) is an
+  `ArgumentError`, as is a conversion with neither input nor `input_files`
+  (pandoc would read this process's standard input and close it: pass
+  `read(stdin)`). `run` takes command-line arguments, parsed by pandoc
+  itself. The output is a `String` for text formats and bytes for binary ones.
   Input given as a string or bytes is read from a temporary file (as
   libpandoc does), so RST's `include` and Org's `#+INCLUDE` with a
   relative path find nothing, and `$sourcefile$` names that file: give

@@ -11,6 +11,34 @@ function _options(options::AbstractDict, kw)
     opts
 end
 
+# The format: an argument, or an option under either of pandoc's names
+# (`names`), not both; else `default`.
+function _format!(opts, given, names, default)
+    there = [k for k in names if haskey(opts, k)]
+    length(there) + (given !== nothing) > 1 &&
+        throw(ArgumentError("the format given twice: $(join([given === nothing ? String[] : ["as an argument"]; there], ", "))"))
+    if isempty(there)
+        opts[first(names)] = given === nothing ? default : given
+    elseif first(there) != first(names)
+        opts[first(names)] = pop!(opts, first(there))
+    end
+    opts
+end
+
+# Options a function has no use for: refused rather than ignored.
+function _refuse(opts, keys, what)
+    bad = [k for k in keys if haskey(opts, k)]
+    isempty(bad) || throw(ArgumentError("$what takes no $(join(bad, ", "))"))
+end
+
+# A conversion with no input would read this process's standard input, and
+# pandoc closes it: refused (pass `read(stdin)`).
+function _input(input, opts)
+    input === nothing && isempty(something(get(opts, "input-files", nothing), ())) &&
+        throw(ArgumentError("no input: give the document (`read(stdin)` for standard input) or `input_files`"))
+    input
+end
+
 # What libpandoc is given as JSON: UTF-8, as JSON is (a file name that isn't
 # would be refused as "Invalid UTF-8 stream", or read as another name).
 function _json(x)
@@ -92,11 +120,12 @@ end
     LibPandoc.convert(input = nothing, options = Dict(); options...)
 
 Convert `input` (a string or bytes, what pandoc would read on standard
-input; `nothing` for the options' `input_files`) as `pandoc` would, with
-these options: pandoc's defaults-file keys, as keywords with `_` for `-`
-(`reference_doc = "ref.docx"`) or as a `Dict`. The output: a `String`
-for text formats, bytes for binary ones (docx, pdf, ...), and `""` when
-`output_file` is set.
+input; `nothing` for the options' `input_files`, which are then required)
+as `pandoc` would, with these options: pandoc's defaults-file keys, as
+keywords with `_` for `-` (`reference_doc = "ref.docx"`) or as a `Dict`
+(a keyword wins over the same key in it). The output: a `String` for text
+formats, bytes for binary ones (docx, pdf, ...), and `""` when
+`output_file` names a file.
 
 `filters` may mix pandoc's (Lua or JSON filter paths, `"citeproc"`) with
 Julia ones, in order, all inside the one pandoc run (see [`LibPandoc`](@ref)).
@@ -122,20 +151,23 @@ LibPandoc.convert(; input_files = ["a.md"], output_file = "a.docx")
 """
 function convert(input = nothing, options::AbstractDict = Dict{String, Any}(); kw...)
     opts = _options(options, kw)
+    _input(input, opts)
     cbs, entries = _plan(get(opts, "filters", ()), opts)
     isempty(cbs) || (opts = merge(opts, Dict("filters" => entries)))
     out = _convert(_json(opts), input, cbs)
-    haskey(opts, "output-file") && return ""
-    _text_output(get(opts, "to", "html")) ? String(out) : out
+    # (output-file null or "-": pandoc's standard output, which is `out`)
+    get(opts, "output-file", nothing) isa AbstractString && opts["output-file"] != "-" && return ""
+    _text_output(something(get(opts, "to", nothing), get(opts, "writer", nothing), "html")) ? String(out) : out
 end
 
 """
     LibPandoc.run(args; input = nothing) -> Vector{UInt8}
 
 Run pandoc with command-line arguments, as `pandoc ARGS`: what it writes to
-standard output. `input` is standard input. Informational options
-(`--version`, `--list-*`) are refused: use [`pandoc_version`](@ref) and the
-like instead.
+standard output. `input` is standard input; with no `input` and no input
+file among the arguments, pandoc reads this process's standard input, as
+the command does (and closes it). Informational options (`--version`,
+`--list-*`) are refused: use [`pandoc_version`](@ref) and the like instead.
 """
 function run(args::AbstractVector{<:AbstractString}; input = nothing)
     all(isvalid, args) || throw(ArgumentError("run's arguments are UTF-8 (libpandoc's pandoc_convert_args): " *
@@ -147,16 +179,19 @@ end
     LibPandoc.read(text, from = "markdown"; options...) -> Panir.Pandoc
     LibPandoc.read(text, conversion::Panir.Conversion; options...)
 
-Parse `text` into a document. Given the conversion a filter runs in
-(`ctx.conversion`), read it the way that conversion reads its input, as
-[`read_many`](@ref) does: for a filter that parses a fragment.
+Parse `text` (a string or bytes; `nothing` for the options'
+`input_files`) into a document, converting as [`convert`](@ref) does
+(filters, `timeout`, ...) to pandoc's JSON. The format is an argument or
+the option `from` (or `reader`), not both. Given the conversion a filter
+runs in (`ctx.conversion`), read it the way that conversion reads its
+input, as [`read_many`](@ref) does: for a filter that parses a fragment.
 """
-function read(text, from::AbstractString = "markdown"; kw...)
+function read(text, from::Union{Nothing, AbstractString} = nothing; kw...)
     opts = _options(Dict{String, Any}(), kw)
-    opts["from"] = from
+    _refuse(opts, ("to", "writer", "output-file"), "read (its output is the document)")
+    _format!(opts, from, ("from", "reader"), "markdown")
     opts["to"] = "json"
-    delete!(opts, "output-file")
-    Panir.parse(String(_convert(_json(opts), text)))
+    Panir.parse(convert(text, opts))
 end
 
 read(text, c::Conversion; kw...) = only(read_many([text], c; kw...))
@@ -164,11 +199,12 @@ read(text, c::Conversion; kw...) = only(read_many([text], c; kw...))
 """
     LibPandoc.read_many(texts, from = "markdown"; return_exceptions = false, options...) -> Vector{Panir.Pandoc}
 
-Parse many texts, each on its own, in parallel: one call into pandoc,
+Parse many texts (a vector of strings), each on its own, in parallel: one call into pandoc,
 which sets up the reader once and reads the texts on all its threads, much
 cheaper than a `read` each. `from` is a format, or the conversion a filter
-runs in (`ctx.conversion`), to read the texts the way it reads its input.
-Options that affect reading apply (`tab_stop`, `abbreviations`,
+runs in (`ctx.conversion`), to read the texts the way it reads its input
+(the format: an argument or the option `from`, not both). Only options
+that affect reading are taken (`tab_stop`, `abbreviations`,
 `resource_path`, `sandbox`, ...), and `timeout` (seconds), the whole
 call's: it returns within about that long, a text not read by then failing
 with a `PandocError` of kind `"Timeout"`. The readers' warnings (an include
@@ -183,10 +219,20 @@ cells(b::CodeBlock, ctx) =
     reduce(vcat, (d.blocks for d in LibPandoc.read_many(split(b.text, '\\n'), ctx.conversion)))
 ```
 """
-function read_many(texts, from::Union{AbstractString, Conversion} = "markdown";
+function read_many(texts, from::Union{Nothing, AbstractString, Conversion} = nothing;
                    return_exceptions::Bool = false, kw...)
-    opts = from isa Conversion ? read_options(from) : Dict{String, Any}("from" => from)
-    merge!(opts, _options(Dict{String, Any}(), kw))
+    texts isa Union{AbstractString, AbstractVector{UInt8}} &&
+        throw(ArgumentError("read_many takes texts, not one: read_many([text])"))
+    opts = _options(Dict{String, Any}(), kw)
+    bad = setdiff(keys(opts), _READ_MANY_OPTIONS)
+    isempty(bad) || throw(ArgumentError("read_many takes only options that affect reading, not $(join(sort!(collect(bad)), ", "))"))
+    if from isa Conversion
+        # the conversion's way, in another format if the options name one
+        _format!(opts, nothing, ("from", "reader"), nothing)
+        opts = merge(read_options(from, opts["from"]), filter(p -> p.first != "from", opts))
+    else
+        _format!(opts, from, ("from", "reader"), "markdown")
+    end
     inputs = String[t isa AbstractVector{UInt8} ? String(copy(t)) : String(t) for t in texts]
     out = JSON.parse(String(_read_many(_json(Dict("options" => opts, "inputs" => inputs)))))
     docs = Any[]
@@ -201,6 +247,12 @@ function read_many(texts, from::Union{AbstractString, Conversion} = "markdown";
     end
     return_exceptions ? docs : Vector{Panir.Pandoc}(docs)
 end
+
+# What read_many takes: pandoc's options that affect reading (libpandoc.h),
+# and libpandoc's own.
+const _READ_MANY_OPTIONS = ("from", "reader", "abbreviations", "data-dir", "default-image-extension",
+                            "indented-code-classes", "preserve-tabs", "resource-path", "sandbox",
+                            "strip-comments", "tab-stop", "track-changes", "timeout", "untrusted")
 
 # The conversion's options that also apply to reading a fragment of it.
 const _READ_OPTIONS = ("abbreviations", "data-dir", "default-image-extension", "indented-code-classes",
@@ -240,11 +292,13 @@ end
 """
     LibPandoc.write(doc::Panir.Pandoc, to = "html"; options...)
 
-Render a document, as `convert` from JSON would.
+Render a document, as `convert` from JSON would. The format is an argument
+or the option `to` (or `writer`), not both.
 """
-function write(doc::Panir.Pandoc, to::AbstractString = "html"; kw...)
+function write(doc::Panir.Pandoc, to::Union{Nothing, AbstractString} = nothing; kw...)
     opts = _options(Dict{String, Any}(), kw)
+    _refuse(opts, ("from", "reader", "input-files"), "write (its input is the document)")
+    _format!(opts, to, ("to", "writer"), "html")
     opts["from"] = "json"
-    opts["to"] = to
     convert(Panir.serialize(doc), opts)
 end

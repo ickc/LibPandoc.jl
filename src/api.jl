@@ -160,7 +160,8 @@ runs in (`ctx.conversion`), to read the texts the way it reads its input.
 Options that affect reading apply (`tab_stop`, `abbreviations`,
 `resource_path`, `sandbox`, ...), and `timeout` (seconds), the whole
 call's: it returns within about that long, a text not read by then failing
-with a `PandocError` of kind `"Timeout"`.
+with a `PandocError` of kind `"Timeout"`. The readers' warnings (an include
+file not found) are logged, as `convert`'s.
 
 A text that can't be read throws its `PandocError` (the first one's); with
 `return_exceptions = true` each such error is in the result in its text's

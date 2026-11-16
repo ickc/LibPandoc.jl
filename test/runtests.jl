@@ -117,6 +117,8 @@ end
     @test length(docs) == 3 && docs[3].blocks[1] isa Header
     e = try P.read_many(["a"], "nonesuch") catch e; e end
     @test e isa PandocError
+    # the readers' warnings are logged, as a conversion's
+    @test_logs (:warn, r"Could not load include file") match_mode = :any P.read_many(["\\input{nowhere-at-all}"], "latex")
     # as a conversion reads: its input format and reader options
     c = Conversion(; input_format = "commonmark", options = Dict{String, Any}("tab-stop" => 2))
     @test P.read_options(c) == Dict("from" => "commonmark", "tab-stop" => 2)

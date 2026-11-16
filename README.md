@@ -30,7 +30,7 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
   The output is a `String` for text formats and bytes for binary ones.
 - **Errors** throw `PandocError`, with `kind` set to pandoc's error
   constructor (`"PandocParseError"`, ...), or `"Timeout"`. pandoc's
-  **warnings** are logged with `@warn`.
+  **warnings** are logged with `@warn`, `read_many`'s readers' too.
 - **Time limit:** `timeout = seconds` (libpandoc's option, for `convert`,
   `read`, `write`, `read_many`) stops a call still running after that
   long, a `PandocError` of kind `"Timeout"`; the process goes on. It stops

@@ -18,6 +18,9 @@ jobs:
   test:
     name: test (${{ matrix.os }}, Julia ${{ matrix.julia }})
     runs-on: ${{ matrix.os }}
+    # as libpandoc-rs's and libpandoc-python's: a cold compilation of
+    # libpandoc.wasm takes minutes on a runner; a hang fails, not after 6 hours
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -42,8 +45,39 @@ jobs:
           echo "LIBPANDOC_WASM_FILTERS=$RUNNER_TEMP/libpandoc-rs/filters/target/wasm32-wasip1/release" >> "$GITHUB_ENV"
       # no libpandoc installed: the package downloads libpandoc's release, as for a user
       - uses: julia-actions/julia-buildpkg@v1
+      # libpandoc.wasm (~60 MB) for the directory sandbox's tests, downloaded
+      # by the package (checked against the release's SHA256SUMS), and
+      # wasmtime's compilation of it (20 s and 8 GB of memory and swap on a
+      # desktop, minutes on a runner), kept between runs until the release's
+      # module or Wasmtime_jll changes
+      - name: libpandoc.wasm (continuous release), which version
+        id: wasm
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          digest=$(gh release view continuous -R ickc/libpandoc --json assets \
+            -q '.assets[] | select(.name == "libpandoc.wasm") | .digest')
+          echo "sha256=${digest#sha256:}" >> "$GITHUB_OUTPUT"
+          echo "wasmtime=$(julia --project -e 'import Wasmtime_jll; print(pkgversion(Wasmtime_jll))')" >> "$GITHUB_OUTPUT"
+          echo "LIBPANDOC_DOWNLOAD_DIR=$RUNNER_TEMP/libpandoc-dl" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/libpandoc-dl/continuous/libpandoc.wasm
+            ~/.cache/wasmtime
+            ~/Library/Caches/BytecodeAlliance.wasmtime
+            ~/AppData/Local/BytecodeAlliance/wasmtime
+          key: libpandoc-wasm-${{ runner.os }}-${{ runner.arch }}-${{ steps.wasm.outputs.sha256 }}-wasmtime-${{ steps.wasm.outputs.wasmtime }}
+      - name: libpandoc.wasm (the package's download, compiled)
+        shell: bash
+        run: julia --project -e 'import LibPandoc; LibPandoc.convert("*x*"; to = "html", sandbox = (read = String[],)) == "<p><em>x</em></p>\n" || exit(1)'
       - name: Test
         shell: bash
+        env:
+          # every sandboxed conversion in the tests is limited (pandocjl's set
+          # their own): one that hangs fails in minutes
+          LIBPANDOC_WASM_TIMEOUT: "120"
         run: julia --threads=2 --project -e 'import Pkg; Pkg.test()'
       - name: pandocjl as an app
         if: matrix.os != 'windows-latest'

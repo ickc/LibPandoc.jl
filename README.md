@@ -49,8 +49,8 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
   filter runs to its end, and the call fails when it returns) nor Lua
   filters. `read_many`'s limit is the whole call's: a text not read by then
   fails on its own (`return_exceptions = true` keeps the others'
-  documents). No memory limit: for documents from someone you don't trust,
-  a process of their own, a `timeout`, and `sandbox` or `untrusted`.
+  documents). No memory limit natively: for documents from someone you
+  don't trust, the directory sandbox (below), which has both limits.
 - **Threads:** conversions from different tasks and threads run in
   parallel, on pandoc's own threads: one per logical core, or
   `$LIBPANDOC_NUM_THREADS`; `num_threads()`. `set_num_threads(n)` sets the
@@ -192,6 +192,135 @@ built from (`sysimage/build.jl` says what matters).
 Or, many documents, convert them from one Julia session: after the first,
 a Julia filter adds about what a Python one does (MANUAL: +170–220 ms to
 pandoc's 284 ms).
+
+## Security: documents you don't trust
+
+pandoc reads what a document asks for: LaTeX's `\input`, RST, Org,
+AsciiDoc, man and Typst includes, images (embedded with
+`embed_resources`, in a docx or an EPUB), a `bibliography:` or `csl:` in
+its metadata. Run on a document from elsewhere, it can put any file you
+can read into its output. pandoc's own sandbox (`sandbox = true`) is all
+or nothing: the document reads no file at all, not even its own images.
+
+A **directory sandbox** is a container at the level of mounts: pandoc runs
+whole inside libpandoc.wasm (pandoc built for WebAssembly) under wasmtime,
+in this process, and sees only the directories you list, as a container
+sees only its mounts. The same as libpandoc-rs's and libpandoc-python's.
+
+```julia
+html = Pandoc.convert(; input_files = ["paper.tex"], to = "html",
+                      sandbox = (read = ["."], write = ["out"]))
+```
+
+```sh
+LIBPANDOC_SANDBOX=. LIBPANDOC_SANDBOX_WRITE=out pandocjl paper.tex -s -o out/paper.html
+```
+
+**What is mounted.** The read list (`read`, `$LIBPANDOC_SANDBOX`) and the
+write list (`write`, `$LIBPANDOC_SANDBOX_WRITE`, readable too), each
+directory at its own absolute path. The option (a named tuple, or a `Dict`
+as in JSON: `"sandbox" => Dict("read" => [...])`) is for `convert`, `read`
+and `write`; the variables, lists as `PATH` is (`:`, `;` on Windows), for
+`run` and `pandocjl`. A directory that doesn't exist is an error; a
+variable set but empty, or an empty list, mounts nothing. A private
+temporary directory. No network, no programs. Of the environment, only
+`SOURCE_DATE_EPOCH` (for a reproducible docx, odt or epub). Nothing else:
+**not the user data directory, not `PANDOC_DATA_DIRS`**: list them if
+pandoc is to find your templates and filters there.
+
+**Everything pandoc reads must be in a mounted directory**: what the
+document names, and what you name too (input files, template, CSS,
+bibliography, defaults files, Lua filters). Outside, a file is missing.
+Output goes to standard output (the returned value), or into a directory
+of the write list (`output_file`, `extract_media`, `log_file`; `-o`,
+`--extract-media`, `--log`). The options and arguments reach pandoc
+untouched. Listing a directory opens all of it to the document: list the
+document's own directory, not your home.
+
+**Filters.** Lua filters run inside, confined as the document is (in
+plain pandoc a Lua filter can do anything you can). Filters that are
+programs (JSON filters) fail (status 83 in `pandocjl`): wasm starts no
+process, and a filter run outside would read whatever the document names.
+Julia filters (functions, `RawFilter`s, a package's `pandoc_filter`) and
+Julia filter scripts (`-F foo.jl`) are your code, as trusted as the
+command line: they run in this process as they do without the sandbox,
+called back by the module, unconfined. Wasm filters run in this process
+too, seeing the same mounts. `pandocjl lua` and `pandoc server` are not in
+the module (status 4). A filter that reads fragments with
+`read(text, ctx.conversion)` reads them in pandoc's own sandbox: no files.
+`read_many` reads in this process: a directory sandbox there is an error.
+
+**Limits.** `$LIBPANDOC_WASM_TIMEOUT` (seconds) and
+`$LIBPANDOC_WASM_MAX_MEMORY` (bytes, or with `k`, `m`, `g`), or for one
+call the sandbox's `timeout` and `max_memory` (bytes, an integer;
+`"max-memory"` in a `Dict`), stop a conversion past them, counted from the
+module's start; none by default (or 0), wasm's 4 GiB at most. A negative,
+infinite or NaN one is an `ArgumentError`. A conversion stopped by the
+time limit throws a `PandocError` of kind `"Timeout"`, as one past
+libpandoc's `timeout` (which works inside too, but doesn't stop Lua); one
+out of memory a `PandocError` saying it is most likely that (wasmtime's C
+API refuses the growth past the limit and doesn't say so: the module then
+stops). A document can be built to take time or memory (Typst's `#while
+true {}`: 3 GB in 4.5 s natively; 100,000 nested `>`: over 15 s): set
+**both** for documents from the internet. The memory limit alone does not
+stop every such document: a loop that grows slowly, or not at all, runs on
+until the time limit. The time limit covers pandoc and Lua inside the
+module, not filters run in this process (a Julia filter runs to its end; a
+wasm filter has its own limits).
+
+**Threads.** The module runs on the calling task, and calls the Julia
+filters back on it. As for any conversion with Julia filters, the task
+stays on its thread meanwhile, and another task on that thread waits for
+it to finish before it starts one (wasmtime, as pandoc, returns to the
+thread that called it, in order): conversions from different threads run
+in parallel.
+
+**What to know.**
+
+- `..` from one mounted directory into another fails (each mount resolves
+  alone), in an absolute path too; a path without `..` works.
+- Relative names resolve from the working directory, which must be in a
+  mounted directory; if it isn't, they find nothing and the error says so.
+- On Windows a path with a drive letter means nothing inside: use relative
+  names with `/`, or `/c/...` for `C:\...`.
+- A path leaving a mount by `..` or a symbolic link fails as "permission
+  denied", where a missing file "does not exist": a document can tell the
+  two apart where pandoc shows the error (an input file, an AsciiDoc or
+  Typst include), though it reads nothing. A template, CSS or bibliography
+  reads as missing either way.
+- PDF output needs a program and fails, saying so: write LaTeX, HTML or
+  Typst and make the PDF outside.
+- `pandocjl --version` says what runs: the module's pandoc
+  (`Features: -server -lua`).
+
+**What it doesn't protect from:** a hard link inside a mounted directory
+to a file elsewhere (it is that file), and anything else you put in the
+directories; documents built to use time or memory beyond the limits you
+set; your own filters; bugs in wasmtime or in this host.
+
+**The module.** `$LIBPANDOC_WASM=/path/to/libpandoc.wasm`, else
+libpandoc's `continuous` release's, downloaded once (about 60 MB) beside
+the library's download (`~/.local/share/libpandoc/continuous`, see
+Installing; libpandoc-rs keeps it there too) and checked against the
+release's `SHA256SUMS`. A cached module older than this package needs
+fails, naming the file to remove. Its **first compilation takes about 20 s
+and 8 GB of memory**, RAM and swap together (no setting of wasmtime's
+lowers that; with less, the process is killed); wasmtime's cache
+(`~/.cache/wasmtime`) keeps the result, and later processes load it in
+about 0.4 s. Precompiling the package and building the system image never
+touch it, whatever the variables say. wasmtime comes with the package
+(Wasmtime_jll): the setting is never ignored.
+
+**What it costs** (pandoc's MANUAL, markdown to HTML, one run of
+`pandocjl`): 3.1 s and 1.8 GB at most against 0.85 s and 0.71 GB natively;
+in a process that has loaded the module (0.5 s), 2.1 s a conversion against
+0.23 s, and a small one takes 4.5 ms. The first run: 25 s and 9.0 GB. (Of
+the 2.1 s, about 0.3 are wasmtime's bounds checks in the module's code:
+this package leaves signals to Julia, where libpandoc-rs and
+libpandoc-python let wasmtime catch out-of-bounds accesses with them.)
+
+**For real isolation**, run the conversion where only the directory
+exists, a container at least, a virtual machine better.
 
 ## Installing
 

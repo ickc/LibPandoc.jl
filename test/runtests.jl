@@ -425,6 +425,18 @@ end
         @test status == 0 && out == "## A!\n\nB!\n"
         status, _, err = pandocjl("-F", "boom.jl"; input = "x", dir = d)
         @test status == 83 && contains(err, "boom")
+        # a file name that isn't UTF-8 (Linux: macOS and Windows take only Unicode names)
+        if Sys.islinux()
+            name = String(UInt8[codeunits("caf")..., 0xe9, codeunits(".md")...])
+            Base.write(joinpath(d, name), "*caf*")
+            status, out, err = pandocjl("-t", "plain", "-F", "upper.jl", name; dir = d)
+            @test status == 0 && out == "CAF\n"
+            status, _, _ = pandocjl("-t", "plain", name, "-o", name * ".txt"; dir = d)
+            @test status == 0 && Base.read(joinpath(d, name * ".txt"), String) == "caf\n"
+            # where it would cross as JSON or as UTF-8 arguments: refused, saying why
+            @test_throws ArgumentError P.convert(; input_files = [joinpath(d, name)], to = "plain")
+            @test_throws ArgumentError P.run([joinpath(d, name)])
+        end
         if !isempty(WASM)
             status, out, _ = pandocjl("-t", "plain", "-F", wasm("upper"); input = "a *b*")
             @test status == 0 && out == "A B\n"

@@ -46,7 +46,9 @@ end
 function _main(args::Vector{String})
     _user_load_path!()
     parsed = try
-        query("parse-args"; args)
+        # as text: a file name that isn't UTF-8 is U+FFFD here, which matters
+        # only if it names a filter; pandoc_main gets the bytes
+        query("parse-args"; args = [map(c -> isvalid(c) ? c : '\ufffd', a) for a in args])
     catch e
         e isa PandocError || rethrow()
         Dict{String, Any}()  # pandoc_main reports it, as pandoc does

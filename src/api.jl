@@ -11,7 +11,14 @@ function _options(options::AbstractDict, kw)
     opts
 end
 
-_json(x) = JSON.json(x)
+# What libpandoc is given as JSON: UTF-8, as JSON is (a file name that isn't
+# would be refused as "Invalid UTF-8 stream", or read as another name).
+function _json(x)
+    s = JSON.json(x)
+    isvalid(s) || throw(ArgumentError("text that isn't UTF-8 (a file name?): libpandoc takes " *
+                                      "options, queries and read_many's texts as JSON, which is UTF-8"))
+    s
+end
 
 """
     LibPandoc.query(name; params...)
@@ -130,7 +137,11 @@ standard output. `input` is standard input. Informational options
 (`--version`, `--list-*`) are refused: use [`pandoc_version`](@ref) and the
 like instead.
 """
-run(args::AbstractVector{<:AbstractString}; input = nothing) = _convert_args(args, input)
+function run(args::AbstractVector{<:AbstractString}; input = nothing)
+    all(isvalid, args) || throw(ArgumentError("run's arguments are UTF-8 (libpandoc's pandoc_convert_args): " *
+                                              "for a file name that isn't, main (pandocjl) takes any"))
+    _convert_args(args, input)
+end
 
 """
     LibPandoc.read(text, from = "markdown"; options...) -> Panir.Pandoc

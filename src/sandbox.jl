@@ -67,6 +67,7 @@ function _sandbox_of(@nospecialize(opts))
     read, write, timeout, max_memory = String[], String[], missing, missing
     for (k, v) in pairs(s)
         k = _key(k)
+        v === nothing && continue   # (absent: no directories, the environment's limit)
         if k in ("read", "write")
             v isa Union{AbstractVector, Tuple} && all(d -> d isa AbstractString, v) ||
                 throw(_refused("sandbox: \"$k\" lists directories as strings"))

@@ -1,12 +1,14 @@
 # The API: convert, run, read, read_many, write, and pandoc's queries.
 
-# Options as pandoc's defaults-file keys: `_` for `-` in keyword names.
+# Options as pandoc's defaults-file keys: `_` for `-` in keyword names. A
+# value that is `nothing` is an absent option, as Lua's `nil` in a table: the
+# key is not there (a keyword `nothing` leaves the Dict's).
 _key(k) = replace(String(k), '_' => '-')
 
 function _options(options::AbstractDict, kw)
-    opts = Dict{String, Any}(String(k) => v for (k, v) in options)
+    opts = Dict{String, Any}(String(k) => v for (k, v) in options if v !== nothing)
     for (k, v) in kw
-        opts[_key(k)] = v
+        v === nothing || (opts[_key(k)] = v)
     end
     opts
 end

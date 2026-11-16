@@ -26,7 +26,10 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
 
 - **Options** are pandoc's [defaults-file](https://pandoc.org/MANUAL.html#defaults-files)
   keys, as keywords with `_` for `-` (`reference_doc = "ref.docx"`), or a
-  `Dict` (a keyword wins over the same key in it). `read`'s, `write`'s and
+  `Dict` (a keyword wins over the same key in it). A value that is
+  `nothing` is an absent option, as Lua's `nil` in a table (`timeout =
+  nothing`: no time limit; in a sandbox, `timeout = nothing`: the
+  environment's); a vector with `nothing` in it is an error. `read`'s, `write`'s and
   `read_many`'s format is an argument or the option (`from`/`reader`,
   `to`/`writer`), not both; an option a function has no use for (`read`'s
   `to`, `write`'s `from`, `read_many`'s `filters`, ...) is an

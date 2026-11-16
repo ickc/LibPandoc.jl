@@ -508,13 +508,25 @@ else
         refused(Dict("read" => "."), "lists directories")
         refused(Dict("read" => [1]), "lists directories")
         # the limits: as a wasm filter's
-        for bad in (-1, NaN, Inf, "1", true, nothing)
+        for bad in (-1, NaN, Inf, "1", true)
             @test_throws ArgumentError P.convert("x"; to = "html", sandbox = (read = String[], timeout = bad))
             @test_throws ArgumentError P.convert("x"; to = "html", sandbox = Dict("read" => String[], "max-memory" => bad))
         end
         @test_throws ArgumentError P.convert("x"; to = "html", sandbox = (max_memory = 1.5,))
-        # read_many reads in this process: a directory sandbox is libpandoc's error
-        @test_throws PandocError P.read_many(["x"]; sandbox = (read = String[],))
+        # read_many reads in this process: a directory sandbox is refused
+        e = refused_with(() -> P.read_many(["x"]; sandbox = (read = String[],)))
+        @test e isa PandocError && contains(e.message, "for conversions")
+        # nothing is absent: no directories, the environment's limits (as
+        # libpandoc-python's None, libpandoc-rs's null); in a list, refused
+        none = (read = nothing, write = nothing, timeout = nothing, max_memory = nothing)
+        @test P.convert("x"; to = "html", sandbox = none) == "<p>x</p>\n"
+        for var in ("LIBPANDOC_WASM_TIMEOUT", "LIBPANDOC_WASM_MAX_MEMORY")
+            e = withenv(var => "-1") do   # (the environment's is read, and refused)
+                refused_with(() -> P.convert("x"; to = "html", sandbox = none))
+            end
+            @test e isa ErrorException && contains(e.msg, var)
+        end
+        refused((read = [nothing],), "lists directories")
         # pandoc's own sandbox stays the native library's
         @test P.convert("*x*"; to = "html", sandbox = true) == "<p><em>x</em></p>\n"
     end

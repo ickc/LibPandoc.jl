@@ -108,6 +108,21 @@ end
     @test P.convert("x"; to = "plain", output_file = "-") == "x\n"
 end
 
+@testset "nothing is an absent option" begin
+    # as Lua's nil in a table: the key is not there
+    @test P.convert("*x*"; to = nothing, timeout = nothing, sandbox = nothing, untrusted = nothing,
+                    standalone = nothing, filters = nothing) == "<p><em>x</em></p>\n"
+    @test P.convert("*x*", Dict("to" => nothing, "timeout" => nothing, "sandbox" => nothing)) == "<p><em>x</em></p>\n"
+    # a keyword nothing leaves the Dict's value
+    @test P.convert("*x*", Dict("to" => "plain"); to = nothing) == "x\n"
+    @test P.read("*x*"; timeout = nothing) == P.read("*x*")
+    @test P.write(P.read("x"); timeout = nothing) == "<p>x</p>\n"
+    @test P.read_many(["x"]; timeout = nothing, sandbox = nothing, to = nothing) == [P.read("x")]
+    # a vector with nothing in it stays an error
+    @test_throws Exception P.convert("x"; filters = [nothing])
+    @test_throws Exception P.convert(; input_files = [nothing])
+end
+
 @testset "no input: refused, not this process's standard input" begin
     # pandoc would read it and close it: Julia's stdin then reads another file
     code = """

@@ -84,6 +84,8 @@ function _plan(@nospecialize(filters), @nospecialize(options); packages::Bool = 
     end
     flush() = isempty(group) || (add(_walks(copy(group), options)); empty!(group))
     for f in filters
+        # (an absent option is nothing, but a list holding it is an error)
+        f === nothing && throw(ArgumentError("filters: `nothing` is not a filter"))
         if _is_julia_filter(f)
             push!(group, _julia_filter(f))
             continue

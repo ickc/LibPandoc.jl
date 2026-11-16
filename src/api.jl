@@ -139,9 +139,13 @@ citeproc), a JSON filter pandoc runs and a Julia script run as a
 subprocess, not code in this process or in Lua: a Julia filter (a function, a script, a wasm filter, which has its own
 limits) runs to its end, and the conversion then fails when it returns; a
 Lua filter isn't stopped at all. There is no memory limit: for documents
-from someone you don't trust, give the conversion a process of its own and
-a `timeout`, with `sandbox = true` or `untrusted = true` so that it reads
-nothing the document names.
+from someone you don't trust, `sandbox = (read = [dirs], write = [dirs])`
+runs the whole conversion in libpandoc.wasm, seeing only those
+directories, within `\$LIBPANDOC_WASM_TIMEOUT` and
+`\$LIBPANDOC_WASM_MAX_MEMORY` (or the sandbox's `timeout` and
+`max_memory`): the README's "Security". Else give it a process of its own
+and a `timeout`, with `sandbox = true` or `untrusted = true` so that it
+reads nothing the document names.
 
 ```julia
 upper(s::Str) = Str(uppercase(s.text))
@@ -152,9 +156,14 @@ LibPandoc.convert(; input_files = ["a.md"], output_file = "a.docx")
 function convert(input = nothing, options::AbstractDict = Dict{String, Any}(); kw...)
     opts = _options(options, kw)
     _input(input, opts)
-    cbs, entries = _plan(get(opts, "filters", ()), opts)
-    isempty(cbs) || (opts = merge(opts, Dict("filters" => entries)))
-    out = _convert(_json(opts), input, cbs)
+    dirs = _sandbox_of(opts)
+    out = if dirs !== nothing
+        _sandboxed_convert(opts, input, dirs)
+    else
+        cbs, entries = _plan(get(opts, "filters", ()), opts)
+        isempty(cbs) || (opts = merge(opts, Dict("filters" => entries)))
+        _convert(_json(opts), input, cbs)
+    end
     # (output-file null or "-": pandoc's standard output, which is `out`)
     get(opts, "output-file", nothing) isa AbstractString && opts["output-file"] != "-" && return ""
     _text_output(something(get(opts, "to", nothing), get(opts, "writer", nothing), "html")) ? String(out) : out
@@ -168,11 +177,14 @@ standard output. `input` is standard input; with no `input` and no input
 file among the arguments, pandoc reads this process's standard input, as
 the command does (and closes it). Informational options (`--version`,
 `--list-*`) are refused: use [`pandoc_version`](@ref) and the like instead.
+With `\$LIBPANDOC_SANDBOX` or `\$LIBPANDOC_SANDBOX_WRITE` set, in the
+directory sandbox (the README's "Security").
 """
 function run(args::AbstractVector{<:AbstractString}; input = nothing)
     all(isvalid, args) || throw(ArgumentError("run's arguments are UTF-8 (libpandoc's pandoc_convert_args): " *
                                               "for a file name that isn't, main (pandocjl) takes any"))
-    _convert_args(args, input)
+    dirs = _sandbox_from_env()
+    dirs === nothing ? _convert_args(args, input) : _sandboxed_args(args, input, dirs)
 end
 
 """
@@ -283,6 +295,9 @@ function read_options(c::Conversion, format = nothing)
         tc = get(_TRACK_CHANGES, get(ro, "track-changes", ""), nothing)
         tc === nothing || (opts["track-changes"] = tc)
     end
+    # a directory sandbox's fragments are read in this process, so in
+    # pandoc's own sandbox: they read no files
+    haskey(opts, "sandbox") && !(opts["sandbox"] isa Bool) && (opts["sandbox"] = true)
     given = something(c.options, Dict{String, Any}())
     opts["from"] = something(format, c.input_format, get(given, "from", nothing),
                              get(given, "reader", nothing), "markdown")

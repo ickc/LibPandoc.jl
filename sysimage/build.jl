@@ -35,8 +35,10 @@ Pkg.instantiate()
 using PackageCompiler
 
 # no wasm limits while building: a timeout starts the clock thread, which
-# hangs writing the image
-seconds = withenv("LIBPANDOC_WASM_TIMEOUT" => nothing, "LIBPANDOC_WASM_MAX_MEMORY" => nothing) do
+# hangs writing the image; no directory sandbox (precompile.jl's pandocjl
+# would compile libpandoc.wasm, its engine's threads in the image)
+seconds = withenv("LIBPANDOC_WASM_TIMEOUT" => nothing, "LIBPANDOC_WASM_MAX_MEMORY" => nothing,
+                  "LIBPANDOC_SANDBOX" => nothing, "LIBPANDOC_SANDBOX_WRITE" => nothing) do
     @elapsed create_sysimage(["LibPandoc", "Panir"]; sysimage_path = output, project,
                              precompile_execution_file = precompile_file, cpu_target)
 end

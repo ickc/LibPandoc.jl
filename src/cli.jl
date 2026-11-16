@@ -29,6 +29,12 @@ file, run in this process, inside the conversion, when they are
   (others run as a subprocess of this Julia, see `LibPandoc` on scripts);
 - a wasm filter: `-F foo.wasm`, run by wasmtime.
 
+With `\$LIBPANDOC_SANDBOX` or `\$LIBPANDOC_SANDBOX_WRITE` set, it is the
+pandoc command of libpandoc.wasm, in the directory sandbox they list (the
+README's "Security"): the filters above run in this process as without it
+(a wasm filter seeing the same directories), Lua filters inside, JSON
+filters not at all.
+
 They are looked for as pandoc does (as given, then in the user data
 directory's `filters/`). Other filters run as with pandoc. Installed as an
 app (`pkg> app add LibPandoc`) this is the `pandocjl` command; `julia -m
@@ -45,6 +51,24 @@ end
 
 function _main(args::Vector{String})
     _user_load_path!()
+    dirs = _sandbox_from_env()
+    dirs === nothing && return _main(args, nothing, nothing)
+    m = try
+        _Mounts(dirs)
+    catch e
+        e isa PandocError || rethrow()
+        println(stderr, PROG, ": ", e.message)
+        return 1
+    end
+    try
+        _main(args, m, dirs)
+    finally
+        _close(m)
+    end
+end
+
+# pandocjl, natively, or in the directory sandbox `dirs` with the mounts `m`.
+function _main(args::Vector{String}, m, dirs)
     parsed = try
         # as text: a file name that isn't UTF-8 is U+FFFD here, which matters
         # only if it names a filter; pandoc_main gets the bytes
@@ -56,7 +80,7 @@ function _main(args::Vector{String})
     filters_json, cbs = nothing, _Callback[]
     if haskey(parsed, "filters")
         cbs, entries = try
-            _plan(parsed["filters"], nothing; packages = true, args)
+            _plan(parsed["filters"], nothing; packages = true, args, mounts = m)
         catch e
             println(stderr, PROG, ": ", sprint(showerror, e))
             return FILTER_FAILED
@@ -66,11 +90,18 @@ function _main(args::Vector{String})
     flush(stdout)
     flush(stderr)
     status = try
-        _pandoc_main([PROG; args], filters_json, cbs)
+        m === nothing ? _pandoc_main([PROG; args], filters_json, cbs) :
+                        first(_sandbox_run(m, dirs, (:main, [PROG; args], filters_json), nothing, cbs))
     catch e
+        # (the sandbox's own: a limit, the module)
+        e isa PandocError && (println(stderr, PROG, ": ", e.message); return 1)
         e isa FilterError || rethrow()
         println(stderr, PROG, ": ", sprint(showerror, e))
         return FILTER_FAILED
+    end
+    if m !== nothing
+        flush(stdout)
+        status == 0 || (note = _note(m)) === nothing || println(stderr, note)
     end
     info = get(parsed, "informational", nothing)
     if info == "Help"

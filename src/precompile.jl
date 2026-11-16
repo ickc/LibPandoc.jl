@@ -22,27 +22,32 @@ precompile(_load_script, (String,))
         false
     end
     @compile_workload begin
+        # (never the directory sandbox, whatever the environment says: its
+        # first compilation takes 20 s and 8 GB, and it would start the
+        # engine's threads and the clock while precompiling)
         if have
-            __init__()
-            upper(s::Panir.Str) = Panir.Str(uppercase(s.text))
-            convert("# Hi *there*\n\ntext"; from = "markdown", to = "html", filters = [upper])
-            convert("x"; to = "html", filters = [RawFilter((json, c) -> json)])
-            read_many(["a", "*b*"], "markdown")
-            write(read("*hi*"), "markdown")
-            mktempdir() do d
-                md, wasm = joinpath(d, "in.md"), joinpath(d, "empty.wasm")
-                Base.write(md, "*hi*")
-                Base.write(wasm, _EMPTY_WASM)
-                redirect_stdout(devnull) do
-                    main(["--version"])
-                    main([md, "-o", joinpath(d, "out.html")])
+            withenv(READ_VAR => nothing, WRITE_VAR => nothing) do
+                __init__()
+                upper(s::Panir.Str) = Panir.Str(uppercase(s.text))
+                convert("# Hi *there*\n\ntext"; from = "markdown", to = "html", filters = [upper])
+                convert("x"; to = "html", filters = [RawFilter((json, c) -> json)])
+                read_many(["a", "*b*"], "markdown")
+                write(read("*hi*"), "markdown")
+                mktempdir() do d
+                    md, wasm = joinpath(d, "in.md"), joinpath(d, "empty.wasm")
+                    Base.write(md, "*hi*")
+                    Base.write(wasm, _EMPTY_WASM)
+                    redirect_stdout(devnull) do
+                        main(["--version"])
+                        main([md, "-o", joinpath(d, "out.html")])
+                    end
+                    # (no limits whatever the environment says: a timeout would start
+                    # the clock thread, which hangs precompiling)
+                    WasmFilter(wasm; timeout = nothing, max_memory = nothing)("{}", Conversion())
+                    # pandocjl's filters: planned with no options
+                    _plan(Any[Dict{String, Any}("type" => "json", "path" => wasm)], nothing; packages = true, args = [md])
+                    _plan(Any[Dict{String, Any}("type" => "json", "path" => "NoSuchPackage")], nothing; packages = true, args = [md])
                 end
-                # (no limits whatever the environment says: a timeout would start
-                # the clock thread, which hangs precompiling)
-                WasmFilter(wasm; timeout = nothing, max_memory = nothing)("{}", Conversion())
-                # pandocjl's filters: planned with no options
-                _plan(Any[Dict{String, Any}("type" => "json", "path" => wasm)], nothing; packages = true, args = [md])
-                _plan(Any[Dict{String, Any}("type" => "json", "path" => "NoSuchPackage")], nothing; packages = true, args = [md])
             end
         end
     end

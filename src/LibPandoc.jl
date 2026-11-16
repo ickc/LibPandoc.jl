@@ -17,7 +17,10 @@ Pandoc.convert("hi"; to = "html", filters = [upper])      # "<p>HI</p>\\n"
 ```
 
 - **Options** are pandoc's defaults-file keys, as keywords (`_` for `-`)
-  or a `Dict`, and libpandoc's own: `timeout` (seconds) and `untrusted`.
+  or a `Dict`, and libpandoc's own: `timeout` (seconds) and `untrusted`;
+  and this package's directory sandbox, `sandbox = (read = [...], write =
+  [...])`: pandoc in libpandoc.wasm, seeing only those directories (the
+  README's "Security"; `\$LIBPANDOC_SANDBOX` for `run` and pandocjl).
   Failures throw `PandocError` (of kind `"Timeout"` past the time limit);
   pandoc's warnings are logged (`@warn`).
 - **Filters** (`filters = [...]`), in order, all in one pandoc run:
@@ -58,6 +61,7 @@ include("api.jl")
 include("wasm.jl")
 include("filters.jl")
 include("scripts.jl")
+include("sandbox.jl")
 include("cli.jl")
 
 function __init__()
@@ -68,6 +72,8 @@ function __init__()
     _VERSION[] = nothing
     empty!(_SCRIPTS)
     empty!(_WASM_FILTERS)
+    empty!(_MODULES)
+    _SANDBOX_LINKER[] = C_NULL
     _ENTRY[] = @cfunction(_callback_entry, Cint, (Ptr{Cvoid}, Ptr{UInt8}, Csize_t, Ptr{UInt8}, Csize_t, Ptr{Cvoid}))
     append!(empty!(_THREAD_LOCKS), [ReentrantLock() for _ in 1:Threads.maxthreadid()])
 end

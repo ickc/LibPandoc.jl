@@ -17,8 +17,9 @@ Pandoc.convert("hi"; to = "html", filters = [upper])      # "<p>HI</p>\\n"
 ```
 
 - **Options** are pandoc's defaults-file keys, as keywords (`_` for `-`)
-  or a `Dict`. Failures throw `PandocError`; pandoc's warnings are logged
-  (`@warn`).
+  or a `Dict`, and libpandoc's own: `timeout` (seconds) and `untrusted`.
+  Failures throw `PandocError` (of kind `"Timeout"` past the time limit);
+  pandoc's warnings are logged (`@warn`).
 - **Filters** (`filters = [...]`), in order, all in one pandoc run:
   - a Julia function with methods for the nodes to change, walked as
     `Panir.walk!` does, `ctx.conversion` saying how pandoc reads and writes;

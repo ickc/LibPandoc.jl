@@ -29,17 +29,27 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
   `Dict`. `run` takes command-line arguments, parsed by pandoc itself.
   The output is a `String` for text formats and bytes for binary ones.
 - **Errors** throw `PandocError`, with `kind` set to pandoc's error
-  constructor (`"PandocParseError"`, ...). pandoc's **warnings** are logged
-  with `@warn`.
+  constructor (`"PandocParseError"`, ...), or `"Timeout"`. pandoc's
+  **warnings** are logged with `@warn`.
+- **Time limit:** `timeout = seconds` (libpandoc's option, for `convert`,
+  `read`, `write`, `read_many`) stops a call still running after that
+  long, a `PandocError` of kind `"Timeout"`; the process goes on. It stops
+  pandoc's own code and JSON filters, not code in this process (a Julia
+  filter runs to its end, and the call fails when it returns) nor Lua
+  filters. `read_many`'s limit is the whole call's: a text not read by then
+  fails on its own (`return_exceptions = true` keeps the others'
+  documents). No memory limit: for documents from someone you don't trust,
+  a process of their own, a `timeout`, and `sandbox` or `untrusted`.
 - **Threads:** conversions from different tasks and threads run in
   parallel, on pandoc's own threads: one per logical core, or
   `$LIBPANDOC_NUM_THREADS`; `num_threads()`. `set_num_threads(n)` sets the
   number only before pandoc first runs something in parallel (it grows to
   it then, once), and returns the number in effect.
-- **Untrusted input:** `untrusted = true` accepts only options that read
+- **Untrusted options:** `untrusted = true` accepts only options that read
   no files, write none, fetch nothing and run nothing, with pandoc's
   sandbox on (libpandoc's list; anything else throws a `PandocError`
-  naming it): for documents or options from someone you don't trust.
+  naming it): for options from code you don't trust. It bounds neither
+  time nor memory (above).
 - **Queries:** `pandoc_version()`, `api_version()`, `input_formats()`,
   `output_formats()`, `extensions(format)`, `default_template(format)`,
   `query(name; params...)`.

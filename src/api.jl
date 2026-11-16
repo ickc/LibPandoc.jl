@@ -92,7 +92,20 @@ for text formats, bytes for binary ones (docx, pdf, ...), and `""` when
 `output_file` is set.
 
 `filters` may mix pandoc's (Lua or JSON filter paths, `"citeproc"`) with
-Julia ones, in order, all inside the one pandoc run (see [`LibPandoc`](@ref)):
+Julia ones, in order, all inside the one pandoc run (see [`LibPandoc`](@ref)).
+
+libpandoc's own options: `untrusted = true` (for options from code you
+don't trust: only those that read, write, fetch and run nothing, with
+pandoc's sandbox on), and `timeout` (seconds): a conversion still running
+after that long is stopped, a `PandocError` of kind `"Timeout"`, and the
+process goes on. It stops pandoc's own code (readers, writers, templates,
+citeproc) and a JSON filter pandoc runs, not code in this process or in
+Lua: a Julia filter (a function, a script, a wasm filter, which has its own
+limits) runs to its end, and the conversion then fails when it returns; a
+Lua filter isn't stopped at all. There is no memory limit: for documents
+from someone you don't trust, give the conversion a process of its own and
+a `timeout`, with `sandbox = true` or `untrusted = true` so that it reads
+nothing the document names.
 
 ```julia
 upper(s::Str) = Str(uppercase(s.text))
@@ -138,30 +151,43 @@ end
 read(text, c::Conversion; kw...) = only(read_many([text], c; kw...))
 
 """
-    LibPandoc.read_many(texts, from = "markdown"; options...) -> Vector{Panir.Pandoc}
+    LibPandoc.read_many(texts, from = "markdown"; return_exceptions = false, options...) -> Vector{Panir.Pandoc}
 
 Parse many texts, each on its own, in parallel: one call into pandoc,
 which sets up the reader once and reads the texts on all its threads, much
 cheaper than a `read` each. `from` is a format, or the conversion a filter
 runs in (`ctx.conversion`), to read the texts the way it reads its input.
+Options that affect reading apply (`tab_stop`, `abbreviations`,
+`resource_path`, `sandbox`, ...), and `timeout` (seconds), the whole
+call's: it returns within about that long, a text not read by then failing
+with a `PandocError` of kind `"Timeout"`.
+
+A text that can't be read throws its `PandocError` (the first one's); with
+`return_exceptions = true` each such error is in the result in its text's
+place instead, the others' documents kept.
 
 ```julia
 cells(b::CodeBlock, ctx) =
     reduce(vcat, (d.blocks for d in LibPandoc.read_many(split(b.text, '\\n'), ctx.conversion)))
 ```
 """
-function read_many(texts, from::Union{AbstractString, Conversion} = "markdown"; kw...)
+function read_many(texts, from::Union{AbstractString, Conversion} = "markdown";
+                   return_exceptions::Bool = false, kw...)
     opts = from isa Conversion ? read_options(from) : Dict{String, Any}("from" => from)
     merge!(opts, _options(Dict{String, Any}(), kw))
     inputs = String[t isa AbstractVector{UInt8} ? String(copy(t)) : String(t) for t in texts]
     out = JSON.parse(String(_read_many(_json(Dict("options" => opts, "inputs" => inputs)))))
-    map(enumerate(out)) do (i, j)
+    docs = Any[]
+    for (i, j) in enumerate(out)
         if haskey(j, "error")
-            e = j["error"]
-            throw(PandocError(e["kind"], "reading input $i: $(e["message"])"))
+            e = PandocError(j["error"]["kind"], "reading input $i: $(j["error"]["message"])")
+            return_exceptions || throw(e)
+            push!(docs, e)
+        else
+            push!(docs, Panir.fromjson(Panir.Pandoc, j))
         end
-        Panir.fromjson(Panir.Pandoc, j)
     end
+    return_exceptions ? docs : Vector{Panir.Pandoc}(docs)
 end
 
 # The conversion's options that also apply to reading a fragment of it.

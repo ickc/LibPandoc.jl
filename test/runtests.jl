@@ -73,6 +73,26 @@ end
     end
 end
 
+@testset "time limit" begin
+    # the review's 100,000 nested block quotes: over 15 s without a limit
+    slow = ">"^100_000
+    timeout(f) = (e = try f(); nothing catch e; e end; e isa PandocError && e.kind == "Timeout")
+    t = @elapsed @test timeout(() -> P.convert(slow; to = "html", timeout = 0.5))
+    @test t < 5
+    @test timeout(() -> P.read(slow; timeout = 0.5))
+    @test P.convert("x"; to = "plain", timeout = 30) == "x\n"   # and the next call works
+    # read_many: the whole call's limit; a text not read in time fails alone
+    @test timeout(() -> P.read_many(["a", slow]; timeout = 0.5))
+    docs = P.read_many(["a", slow, "[x"]; timeout = 0.5, return_exceptions = true)
+    @test docs[1] isa Panir.Pandoc && docs[2] isa PandocError && docs[2].kind == "Timeout"
+    @test docs[3] isa Panir.Pandoc
+    @test P.read_many(["a"]) isa Vector{Panir.Pandoc}
+    # code in this process runs to its end, and the call fails then
+    nap(d::Panir.Pandoc) = (sleep(1); nothing)
+    t = @elapsed @test timeout(() -> P.convert("x"; to = "html", timeout = 0.2, filters = [nap]))
+    @test t >= 1
+end
+
 @testset "run" begin
     @test String(P.run(["-f", "markdown", "-t", "latex"]; input = "*hi*")) == "\\emph{hi}\n"
     @test_throws PandocError P.run(["--version"])

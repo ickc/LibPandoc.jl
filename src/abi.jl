@@ -4,8 +4,18 @@
     PandocError(kind, message)
 
 A pandoc failure. `kind` is pandoc's error constructor, e.g.
-`"PandocParseError"` or `"PandocUnknownReaderError"`; `message` is what the
-pandoc command would print.
+`"PandocParseError"` or `"PandocUnknownReaderError"`, `"Timeout"` for a
+call stopped by its time limit (the option `timeout`), or `"Exception"`;
+`message` is what the pandoc command would print.
+
+```julia
+try
+    Pandoc.convert(text; timeout = 5)
+catch e
+    e isa PandocError && e.kind == "Timeout" || rethrow()
+    ...
+end
+```
 """
 struct PandocError <: Exception
     kind::String

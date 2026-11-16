@@ -127,6 +127,12 @@ for the one running the filter to return, and that one for it.
 What a Julia filter throws fails the conversion, and is thrown as a
 `FilterError` holding the exception and where it was thrown.
 
+Every filter but a Lua one is handed the whole document as pandoc's JSON
+and hands it back, whatever it changes: on a 9.4 MB textbook one that does
+next to nothing adds about 0.35 s (a Lua filter, given elements as it asks
+for them, 0.09 s); pandoc's own encoding and decoding of the JSON is most
+of it. Consecutive Julia filters share one exchange.
+
 ## pandocjl
 
 `pandocjl` is pandoc's command line in this process: it takes pandoc's
@@ -154,17 +160,27 @@ pandocjl -F other-filter input.md              # anything else: as pandoc does
   filter over, is not run again as a subprocess (its side effects would
   happen twice): the conversion fails (`LibPandoc.ScriptFailed`), naming
   those two ways. A script's globals persist between the documents of one
-  process, and so do its changes to `ENV`, the packages it loads and the
-  tasks it starts: it runs with all your rights, as any filter but a wasm
-  one. Its `cd` is undone when it returns, so the output goes where it was
+  process (it is loaded once: `pandocjl` converts one document,
+  `LibPandoc.convert` may convert many), as do its changes to `ENV`, the
+  packages it loads and the tasks it starts: it runs with all your rights,
+  as any filter but a wasm one. Reset what it counts for each document
+  where the walk meets `Pandoc` first (`run_filter(f; traverse =
+  :topdown)`); libpandoc-python runs a Python script afresh for each
+  document instead. Its `cd` is undone when it returns, so the output goes where it was
   named.
 - **A wasm filter** (`-F name.wasm`): a pandoc JSON filter built for WASI
   (`wasm32-wasip1`), such as any [panir](https://github.com/ickc/panir) Rust
   filter; see [libpandoc-rs](https://github.com/ickc/libpandoc-rs). It runs
   in wasmtime, sandboxed: it sees the current directory, read-only, and no
-  network. It may call pandoc (libpandoc-rs's `libpandoc` crate built for
+  network; nothing on the command line names more (`WasmFilter(path;
+  dirs)` does), so an include through `..`, or through a link leaving the
+  directory, is a missing file (in the directory sandbox it sees the
+  mounts instead); of the environment, only the variables pandoc gives
+  filters. It may call pandoc (libpandoc-rs's `libpandoc` crate built for
   wasm): in pandoc's sandbox, with options that name no files (libpandoc
-  checks them, `"untrusted"`: the same for every host). Limits, which
+  checks them, `"untrusted"`: the same for every host), so the calls read
+  no file, not even one the filter can read itself (citeproc takes the
+  metadata's inline `references`, not a `bibliography` file). Limits, which
   pandoc has for no filter: `$LIBPANDOC_WASM_TIMEOUT` (seconds, as
   pandoc-server's `--timeout`; its calls to pandoc included: each runs
   with the time the filter has left as its `"timeout"`) and
@@ -312,6 +328,10 @@ in parallel.
   two apart where pandoc shows the error (an input file, an AsciiDoc or
   Typst include), though it reads nothing. A template, CSS or bibliography
   reads as missing either way.
+- In WASI an empty file name is the working directory: a Lua filter's
+  `io.open("")` opens it, where natively it is a missing file, and reading
+  it then fails (include-code-files' `include=""` fails the conversion
+  inside, where natively it is an empty block); a wasm filter's likewise.
 - PDF output needs a program and fails, saying so: write LaTeX, HTML or
   Typst and make the PDF outside.
 - `pandocjl --version` says what runs: the module's pandoc

@@ -119,6 +119,14 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
   `$LIBPANDOC_NUM_THREADS`; `num_threads()`. `set_num_threads(n)` sets the
   number only before pandoc first runs something in parallel (it grows to
   it then, once), and returns the number in effect.
+- **Standard streams:** while a call into pandoc runs, this process's
+  standard input, output and error are in blocking mode, as for any other
+  program, and back as they were when no call runs. Julia's libuv puts a
+  pipe there in non-blocking mode, in which a Lua filter's `io.stdout:write`
+  stopped at a full pipe (64 KiB, `EAGAIN`), the rest lost, and a JSON
+  filter or a PDF engine inheriting it could fail likewise. Julia's own
+  writes to them meanwhile (a Julia filter's `println`) wait for the
+  reader rather than being queued. (Not on Windows, which has no such mode.)
 - **Untrusted options:** `untrusted = true` accepts only options that read
   no files, write none, fetch nothing and run nothing, with pandoc's
   sandbox on (libpandoc's list; anything else throws a `PandocError`

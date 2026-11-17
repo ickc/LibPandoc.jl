@@ -220,17 +220,55 @@ _filter_error(e, bt) = istimeout(e) || iscancelled(e) ? e : FilterError(e, bt)
 
 # -- the calls -------------------------------------------------------------------------
 
+# Julia's libuv puts the standard streams that are pipes in non-blocking
+# mode (it duplicates fd 1 and 2 and sets FIONBIO on the copies, which share
+# the flag with the originals). Code that writes to them as C does gives up
+# at the first EAGAIN, when the pipe is full (64 KiB on Linux): a Lua
+# filter's `io.stdout:write` returned nil and "Resource temporarily
+# unavailable", the rest lost; a JSON filter or a PDF engine inheriting them
+# fails likewise; WASI's inherited streams in the directory sandbox failed
+# with "hardware fault". (GHC's runtime, pandoc's own output, waits.) So they
+# are blocking while pandoc runs, as for any other program, and as they were
+# once no call runs. Julia's own writes to them meanwhile block too (the
+# copies share the flag) rather than being queued. (Windows: no such mode.)
+const _O_NONBLOCK = Sys.isapple() || Sys.isbsd() ? Cint(0x0004) : Cint(0x0800)
+const _STD_LOCK = ReentrantLock()
+const _STD_FLAGS = Cint[]   # the streams' flags before, while calls go on
+
+function _blocking(f)
+    Sys.iswindows() && return f()
+    lock(_STD_LOCK) do
+        isempty(_STD_FLAGS) || return push!(_STD_FLAGS, -1)   # (one more call)
+        for fd in 0:2
+            flags = @ccall fcntl(fd::Cint, 3::Cint)::Cint   # F_GETFL
+            flags >= 0 && flags & _O_NONBLOCK != 0 && @ccall fcntl(fd::Cint, 4::Cint; (flags & ~_O_NONBLOCK)::Cint)::Cint   # F_SETFL
+            push!(_STD_FLAGS, flags)
+        end
+    end
+    try
+        f()
+    finally
+        lock(_STD_LOCK) do
+            length(_STD_FLAGS) > 3 && return pop!(_STD_FLAGS)
+            for (fd, flags) in zip(0:2, _STD_FLAGS)
+                flags >= 0 && flags & _O_NONBLOCK != 0 && @ccall fcntl(fd::Cint, 4::Cint; flags::Cint)::Cint
+            end
+            empty!(_STD_FLAGS)
+        end
+    end
+end
+
 function _convert(options::AbstractString, input, cbs::Vector{_Callback} = _Callback[]; take = _take)
     s = _load()
     inp = _bytes(input)
     inptr, inlen = inp === nothing ? (C_NULL, 0) : (pointer(inp), length(inp))
-    isempty(cbs) && return GC.@preserve options inp take(
+    isempty(cbs) && return GC.@preserve options inp take(_blocking(() ->
         @ccall gc_safe = true $(s.convert)(options::Cstring, sizeof(options)::Csize_t,
-                                           inptr::Ptr{UInt8}, inlen::Csize_t)::Ptr{_Result})
+                                           inptr::Ptr{UInt8}, inlen::Csize_t)::Ptr{_Result}))
     _with_callbacks(cbs) do fs
-        GC.@preserve options inp _take(
+        GC.@preserve options inp _take(_blocking(() ->
             @ccall gc_safe = true $(s.convert_filters)(options::Cstring, sizeof(options)::Csize_t,
-                inptr::Ptr{UInt8}, inlen::Csize_t, fs::Ptr{_Filter}, length(fs)::Csize_t)::Ptr{_Result})
+                inptr::Ptr{UInt8}, inlen::Csize_t, fs::Ptr{_Filter}, length(fs)::Csize_t)::Ptr{_Result}))
     end
 end
 
@@ -248,9 +286,9 @@ function _convert_args(args::AbstractVector{<:AbstractString}, input)
     inptr, inlen = inp === nothing ? (C_NULL, 0) : (pointer(inp), length(inp))
     argv = _argv(args)
     ptrs = map(pointer, argv)
-    GC.@preserve argv ptrs inp _take(
+    GC.@preserve argv ptrs inp _take(_blocking(() ->
         @ccall gc_safe = true $(s.convert_args)(length(argv)::Cint, ptrs::Ptr{Ptr{UInt8}},
-                                                inptr::Ptr{UInt8}, inlen::Csize_t)::Ptr{_Result})
+                                                inptr::Ptr{UInt8}, inlen::Csize_t)::Ptr{_Result}))
 end
 
 function _read_many(request::AbstractString; take = _take)
@@ -273,8 +311,8 @@ function _pandoc_main(argv::Vector{String}, filters_json::Union{Nothing, String}
     _with_callbacks(cbs) do fs
         GC.@preserve argv ptrs filters_json fs begin
             fsptr = isempty(fs) ? C_NULL : pointer(fs)
-            @ccall gc_safe = true $(s.main)(length(argv)::Cint, ptrs::Ptr{Ptr{UInt8}},
-                fj::Ptr{UInt8}, fjlen::Csize_t, fsptr::Ptr{_Filter}, length(fs)::Csize_t)::Cint
+            _blocking(() -> @ccall gc_safe = true $(s.main)(length(argv)::Cint, ptrs::Ptr{Ptr{UInt8}},
+                fj::Ptr{UInt8}, fjlen::Csize_t, fsptr::Ptr{_Filter}, length(fs)::Csize_t)::Cint)
         end
     end
 end

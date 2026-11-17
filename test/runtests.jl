@@ -678,6 +678,41 @@ end
     end
 end
 
+@testset "a Lua filter's output through a pipe" begin
+    # Julia's libuv puts a pipe on standard output or error in non-blocking
+    # mode; a Lua filter's io.stdout:write stopped at a full pipe (64 KiB,
+    # EAGAIN), the rest lost. The reader here waits until the filter is about
+    # to write, then a second, so that the pipe is full when it does.
+    mktempdir() do d
+        mark = joinpath(d, "writing")
+        lua = joinpath(d, "big.lua")
+        Base.write(lua, """
+            function Pandoc(doc)
+              io.open($(repr(mark)), "w"):close()
+              io.stdout:write(string.rep("x", 100000))
+              io.stderr:write(string.rep("y", 100000))
+              return doc
+            end
+            """)
+        command = `$(Base.julia_cmd()) --startup-file=no --project=$PROJECT -m LibPandoc -t plain -o $(joinpath(d, "out.txt")) -L $lua`
+        code = "import LibPandoc; LibPandoc.convert(\"hi\"; to = \"plain\", filters = [$(repr(lua))])"
+        library = `$(Base.julia_cmd()) --startup-file=no --project=$PROJECT -e $code`
+        for cmd in (command, library)
+            rm(mark; force = true)
+            out, err = Pipe(), Pipe()
+            p = Base.run(pipeline(cmd; stdin = IOBuffer("hi"), stdout = out, stderr = err); wait = false)
+            close(out.in)
+            close(err.in)
+            @test timedwait(() -> isfile(mark) || process_exited(p), 120) === :ok
+            sleep(1)
+            o, e = (@async Base.read(out, String)), (@async Base.read(err, String))
+            wait(p)
+            @test fetch(o) == "x"^100000
+            @test count(==('y'), fetch(e)) == 100000
+        end
+    end
+end
+
 include("cancel.jl")
 include("sandbox.jl")
 include("confined_reads.jl")

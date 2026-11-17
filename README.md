@@ -427,4 +427,11 @@ Status: a prototype.
 
 ## License
 
-GPL-2.0-or-later, as pandoc: the package links pandoc.
+The package's own code is GPL-2.0-or-later (`COPYING.md`), as pandoc's: it
+links pandoc. What it loads is libpandoc, under the GPL, version 2, as a
+whole (pandoc and about 200 Haskell packages, GHC's runtime and a few C
+libraries, each under its own licence). The package carries none of it:
+the library is installed (`LIBPANDOC_PREFIX`, conda) or downloaded, its
+release archive unpacked whole, `COPYING.md` and `THIRD-PARTY-NOTICES`
+beside `lib/`; libpandoc.wasm, for the directory sandbox, is downloaded
+with `libpandoc-wasm-THIRD-PARTY-NOTICES.txt` beside it.

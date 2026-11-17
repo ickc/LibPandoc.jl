@@ -254,19 +254,26 @@ function _sandbox_module()
 end
 
 const _WASM_URL = "https://github.com/ickc/libpandoc/releases/download/$RELEASE/libpandoc.wasm"
+# its licence notices, downloaded beside it
+const _NOTICES = "libpandoc-wasm-THIRD-PARTY-NOTICES.txt"
 
-# libpandoc.wasm of the release, checked against its SHA256SUMS, written
-# beside `path` and then moved there (never half there).
+# libpandoc.wasm of the release, and its notices beside it, each checked
+# against the release's SHA256SUMS, written beside where it goes and then
+# moved there (never half there); the module last.
 function _download_wasm(path; url = _WASM_URL)
     @warn "Downloading libpandoc.wasm (libpandoc $RELEASE, about 60 MB) into $path, once; " *
           "its first compilation takes about 20 s and 8 GB of memory"
     try
-        file = _fetch(url)
-        _check_sum(url, file)
         mkpath(dirname(path))
-        part = "$path.$(getpid()).part"
-        cp(file, part; force = true)
-        mv(part, path; force = true)
+        dir, _ = _split_url(url)
+        notices = isfile(url) ? joinpath(dir, _NOTICES) : "$dir/$_NOTICES"
+        for (from, to) in ((notices, joinpath(dirname(path), _NOTICES)), (url, path))
+            file = _fetch(from)
+            _check_sum(from, file)
+            part = "$to.$(getpid()).part"
+            cp(file, part; force = true)
+            mv(part, to; force = true)
+        end
     catch e
         throw(_refused("downloading libpandoc.wasm: $(_message(e)) (or set $WASM_VAR)", "PandocAppError"))
     end

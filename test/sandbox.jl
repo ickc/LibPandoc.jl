@@ -734,14 +734,19 @@ else
             end
             served = mkpath(joinpath(d, "release"))
             Base.write(joinpath(served, "libpandoc.wasm"), "\0asm-not-really")
-            Base.write(joinpath(served, "SHA256SUMS"), "$("0"^64)  libpandoc.wasm\n")
+            Base.write(joinpath(served, P._NOTICES), "notices\n")
+            notices = "$(bytes2hex(SHA.sha256("notices\n")))  $(P._NOTICES)\n"
+            Base.write(joinpath(served, "SHA256SUMS"), "$("0"^64)  libpandoc.wasm\n" * notices)
             target = joinpath(d, "cache", "libpandoc.wasm")
             e = @test_logs (:warn,) refused_with(() -> P._download_wasm(target; url = joinpath(served, "libpandoc.wasm")))
             @test e isa PandocError && contains(e.message, "says 0000")
-            @test !ispath(target) && (!isdir(dirname(target)) || isempty(readdir(dirname(target))))
-            Base.write(joinpath(served, "SHA256SUMS"), "$(bytes2hex(SHA.sha256("\0asm-not-really"))) *libpandoc.wasm\n")
+            @test !ispath(target)
+            Base.write(joinpath(served, "SHA256SUMS"), "$(bytes2hex(SHA.sha256("\0asm-not-really"))) *libpandoc.wasm\n" * notices)
             @test_logs (:warn,) P._download_wasm(target; url = joinpath(served, "libpandoc.wasm"))
-            @test Base.read(target, String) == "\0asm-not-really" && readdir(dirname(target)) == ["libpandoc.wasm"]
+            # the module, and its licence notices beside it
+            @test Base.read(target, String) == "\0asm-not-really"
+            @test readdir(dirname(target)) == sort([P._NOTICES, "libpandoc.wasm"])
+            @test Base.read(joinpath(dirname(target), P._NOTICES), String) == "notices\n"
         end
     end
 

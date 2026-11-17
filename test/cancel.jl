@@ -85,13 +85,18 @@ cancel_after(t, s) = Threads.@spawn (nap(s); cancel!(t))
 
     # a Julia filter running when the token is cancelled runs to its end; the
     # call then fails. A filter may cancel its own call's token.
+    # (The token is cancelled once the filter is running, which waits to
+    # see it cancelled and goes on to its end; not after a fixed time: on a
+    # busy CI runner a call had not reached its filter by then and was
+    # cancelled before it, seen in libpandoc-rs's twin of this test.)
     t = CancelToken()
-    ran = Threads.Atomic{Bool}(false)
-    slow_filter(d::Panir.Pandoc) = (nap(1); ran[] = true; nothing)
-    c = cancel_after(t, 0.2)
-    e, took = timed(() -> P.convert("x"; to = "html", filters = [slow_filter], cancel = t))
+    started, ran = Threads.Atomic{Bool}(false), Threads.Atomic{Bool}(false)
+    until(f) = (stop = time() + LIMIT; while !f() && time() < stop; nap(0.01); end)
+    slow_filter(d::Panir.Pandoc) = (started[] = true; until(() -> iscancelled(t)); nap(0.1); ran[] = true; nothing)
+    c = Threads.@spawn (until(() -> started[]); cancel!(t))
+    e, _ = timed(() -> P.convert("x"; to = "html", filters = [slow_filter], cancel = t))
     wait(c)
-    @test iscancelled(e) && ran[] && took >= 1
+    @test iscancelled(e) && ran[]
     t = CancelToken()
     @test iscancelled(timed(() -> P.convert("x"; filters = [(d::Panir.Pandoc) -> (cancel!(t); nothing)], cancel = t))[1])
 

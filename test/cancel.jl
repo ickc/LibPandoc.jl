@@ -169,6 +169,8 @@ function interrupted(threads, exit_on_sigint, sandbox = nothing; slow = false)
     sleep(1)
     sent = time()
     kill(p, Base.SIGINT)
+    # (one still running a minute later is killed: the test fails, not hangs)
+    Timer(_ -> process_running(p) && kill(p, Base.SIGKILL), 60)
     line = readline(out)
     took = time() - sent
     rest = Base.read(out, String)

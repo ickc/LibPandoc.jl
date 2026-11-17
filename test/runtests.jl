@@ -715,6 +715,7 @@ end
             @test timedwait(() -> isfile(mark) || process_exited(p), 120) === :ok
             sleep(1)
             o, e = (@async Base.read(out, String)), (@async Base.read(err, String))
+            timedwait(() -> process_exited(p), 120) === :ok || kill(p, Base.SIGKILL)
             wait(p)
             @test fetch(o) == "x"^100000
             @test count(==('y'), fetch(e)) == 100000

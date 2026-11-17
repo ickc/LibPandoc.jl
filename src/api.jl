@@ -134,9 +134,9 @@ Julia ones, in order, all inside the one pandoc run (see [`LibPandoc`](@ref)).
 
 `cancel = token` (a [`CancelToken`](@ref)) stops the conversion when the
 token is cancelled, from another task or a filter: a `PandocError` of kind
-`"Cancelled"`; Ctrl-C stops it (cancelling that token) on thread 1 when
-Julia has another thread (see `CancelToken`). They stop what `timeout`
-stops.
+`"Cancelled"`; Ctrl-C stops it (cancelling that token) when it is made
+on thread 1 and that is Julia's interactive thread (see `CancelToken`).
+They stop what `timeout` stops.
 
 libpandoc's own options: `untrusted = true` (for options from code you
 don't trust: only those that read, write, fetch and run nothing, with

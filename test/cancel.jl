@@ -1,11 +1,17 @@
 # Cancelling calls (CancelToken, `cancel = token`; libpandoc 1.13's cancel
-# tokens) and Ctrl-C: before, during and after a call, from another task,
+# tokens) and Ctrl-C: before, during and after a call, from another thread,
 # with a filter running, in the directory sandbox, and SIGINT sent to a
 # process converting a slow document.
 #
 # The slow input is libpandoc's test/cancel.c's: 100,000 '>' read as
 # markdown, minutes of pandoc's time (a `timeout` bounds each use here, so
 # that a cancel that doesn't work fails the test rather than hanging it).
+#
+# The token's tests don't depend on Ctrl-C's arrangement (a call made on
+# thread 1 run in the default pool): the cancelling task sleeps in its own
+# thread (Libc.systemsleep), not by libuv's timers, which a call holding
+# thread 1 would hold up; it needs a thread other than the call's (the
+# tests run with --threads=2).
 
 const SLOW = ">"^100_000
 const LIMIT = 60
@@ -22,7 +28,7 @@ function timed(f)
     e, time() - t
 end
 
-cancel_after(t, s) = Threads.@spawn (sleep(s); cancel!(t))
+cancel_after(t, s) = Threads.@spawn (Libc.systemsleep(s); cancel!(t))
 
 @testset "cancel" begin
     t = CancelToken()
@@ -64,8 +70,9 @@ cancel_after(t, s) = Threads.@spawn (sleep(s); cancel!(t))
 
     # one token for calls at once: cancelled, it stops them all
     t = CancelToken()
+    # (cancelled from this task: the calls may fill the default pool)
     calls = [Threads.@spawn timed(() -> P.convert(SLOW; timeout = LIMIT, cancel = t))[1] for _ in 1:3]
-    sleep(1)
+    Libc.systemsleep(1)
     cancel!(t)
     @test all(iscancelled ∘ fetch, calls)
 
@@ -73,7 +80,7 @@ cancel_after(t, s) = Threads.@spawn (sleep(s); cancel!(t))
     # call then fails. A filter may cancel its own call's token.
     t = CancelToken()
     ran = Threads.Atomic{Bool}(false)
-    slow_filter(d::Panir.Pandoc) = (sleep(1); ran[] = true; nothing)
+    slow_filter(d::Panir.Pandoc) = (Libc.systemsleep(1); ran[] = true; nothing)
     c = cancel_after(t, 0.2)
     e, took = timed(() -> P.convert("x"; to = "html", filters = [slow_filter], cancel = t))
     wait(c)
@@ -117,46 +124,71 @@ end
 const CTRL_C = """
     import LibPandoc
     Base.exit_on_sigint(EXIT)
+    LibPandoc.convert("*x*"; to = "html", sandbox = SANDBOX)
     println("started"); flush(stdout)
     t0 = time()
     try
-        LibPandoc.convert($(repr(SLOW)); to = "html", timeout = 20, sandbox = SANDBOX)
+        LibPandoc.convert($(repr(SLOW)); to = "html", timeout = 8, sandbox = SANDBOX)
     catch e
         println("caught ", typeof(e), " ", round(time() - t0; digits = 2)); flush(stdout)
     end
     println(LibPandoc.convert("*x*"; to = "html"))
     """
 
-function interrupted(threads, exit_on_sigint, sandbox = nothing)
+# (process, the line after "started", the rest, seconds from the signal to that line)
+function interrupted(threads, exit_on_sigint, sandbox = nothing; slow = false)
     code = replace(CTRL_C, "EXIT" => repr(exit_on_sigint), "SANDBOX" => repr(sandbox))
-    cmd = `$(Base.julia_cmd()) --startup-file=no --threads=$threads --project=$PROJECT -e $code`
+    flag = threads === nothing ? `` : `--threads=$threads`
+    cmd = `$(Base.julia_cmd()) --startup-file=no $flag --project=$PROJECT -e $code`
     out = Pipe()
-    p = Base.run(pipeline(cmd; stdout = out, stderr = devnull); wait = false)
+    p = withenv("JULIA_NUM_THREADS" => nothing) do
+        Base.run(pipeline(cmd; stdout = out, stderr = devnull); wait = false)
+    end
     close(out.in)
     @test readline(out) == "started"
-    sleep(sandbox === nothing ? 2 : 4)
+    sleep(1)
     sent = time()
     kill(p, Base.SIGINT)
+    line = readline(out)
+    took = time() - sent
     rest = Base.read(out, String)
     wait(p)
-    p, rest, time() - sent
+    took < 4 || slow || @info "Ctrl-C took $(round(took; digits = 2)) s" threads exit_on_sigint sandbox line rest
+    p, line, rest, took
 end
 
-if !Sys.iswindows()
+if Sys.iswindows()
+    @info "Ctrl-C: not tested on Windows (no way to send a child process Ctrl-C here)"
+else
     @testset "Ctrl-C" begin
-        # with another thread: the call stops at once, InterruptException,
-        # and the library goes on
-        for sandbox in (nothing, (read = String[], timeout = LIMIT))
-            p, out, took = interrupted(2, false, sandbox)
-            @test success(p) && startswith(out, "caught InterruptException") && contains(out, "<p><em>x</em></p>")
+        # Julia's default threads, and --threads=2: the call stops at once,
+        # InterruptException, and the library goes on
+        for threads in (nothing, 2), sandbox in (nothing, (read = String[], timeout = LIMIT))
+            p, line, rest, took = interrupted(threads, false, sandbox)
+            @test success(p) && startswith(line, "caught InterruptException") && contains(rest, "<p><em>x</em></p>")
             @test took < 4
         end
-        # with one thread: nowhere else to run it, it takes Ctrl-C when it
-        # returns (its 20 s), as before; no crash
-        p, out, took = interrupted(1, false)
-        @test success(p) && startswith(out, "caught InterruptException") && took > 10
-        # a script, which exits on SIGINT (Julia's default): at once
-        p, out, took = interrupted(2, true)
+        # with no interactive thread (--threads=1, or 2,0): the call takes
+        # Ctrl-C when it returns (its time limit, 8 s); no crash
+        p, line, rest, took = interrupted(1, false; slow = true)
+        @test success(p) && startswith(line, "caught InterruptException") && took > 5
+        # a script, which exits on SIGINT (Julia's default), with one thread
+        # in the default pool (the call's): at once, the call cancelled
+        # (Julia's exit waits for a task of its own in that pool)
+        p, line, rest, took = interrupted(nothing, true)
         @test p.termsignal == Base.SIGINT && took < 4
+        # pandocjl, a command (`julia -m`, which Julia leaves throwing
+        # InterruptException): at once too
+        mktempdir() do d
+            Base.write(joinpath(d, "slow.md"), SLOW)
+            cmd = `$(Base.julia_cmd()) --startup-file=no --project=$PROJECT -m LibPandoc -t html slow.md -o slow.html`
+            p = cd(() -> Base.run(pipeline(cmd; stderr = devnull); wait = false), d)
+            sleep(10)
+            sent = time()
+            kill(p, Base.SIGINT)
+            timedwait(() -> process_exited(p), 60) === :ok || kill(p, Base.SIGKILL)
+            wait(p)
+            @test p.termsignal == Base.SIGINT && time() - sent < 4
+        end
     end
 end

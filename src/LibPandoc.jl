@@ -79,6 +79,7 @@ function __init__()
     _SANDBOX_LINKER[] = C_NULL
     _ENTRY[] = @cfunction(_callback_entry, Cint, (Ptr{Cvoid}, Ptr{UInt8}, Csize_t, Ptr{UInt8}, Csize_t, Ptr{Cvoid}))
     append!(empty!(_THREAD_LOCKS), [ReentrantLock() for _ in 1:Threads.maxthreadid()])
+    atexit(_on_exit)
 end
 
 include("precompile.jl")

@@ -38,9 +38,16 @@ filters not at all.
 They are looked for as pandoc does (as given, then in the user data
 directory's `filters/`). Other filters run as with pandoc. Installed as an
 app (`pkg> app add LibPandoc`) this is the `pandocjl` command; `julia -m
-LibPandoc ARGS` is the same.
+LibPandoc ARGS` is the same. Outside the REPL (`isinteractive()` false) it
+makes Ctrl-C end the process at once, as pandoc's does
+(`Base.exit_on_sigint(true)`, a script's default, which `julia -m` doesn't
+set).
 """
 function (@main)(args = ARGS)
+    # Ctrl-C ends the command at once, as pandoc's (`julia -m` leaves Julia
+    # throwing it, which a call into pandoc takes only when it returns); not
+    # when called from the REPL
+    isinteractive() || Base.exit_on_sigint(true)
     try
         _main(String.(args))
     catch e

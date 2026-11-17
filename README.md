@@ -71,20 +71,49 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
   LibPandoc.convert(text; to = "html", cancel = token)
   ```
 
-  **Ctrl-C:** in a script Julia exits at once on Ctrl-C (its default).
-  Elsewhere (the REPL; a script with `Base.exit_on_sigint(false)`) Julia
-  throws `InterruptException` in the task on thread 1, at its next
-  safepoint, which a task inside a call into pandoc reaches only when the
-  call returns: so a call made on thread 1 runs on another thread (a task
-  pinned there, the caller waiting), and Ctrl-C stops it within
-  milliseconds (cancelling the call's token, or one of its own): an
-  `InterruptException`. That needs a second thread, which the REPL has by
-  default (one default and one interactive thread) and `julia --threads=2`
-  gives; with one thread (`--threads=1,0`), and on Windows, Ctrl-C takes
-  effect when the call returns. Julia filters of such a call run on that thread, in a task
-  inheriting the caller's scope and logger. Not for `untrusted = true`
-  calls (no token), nor `run`. Measured: 0.35 s from the signal to the
-  REPL's prompt; 15 µs a call.
+  **Ctrl-C.** Thread 1 runs the main task (a script's, the REPL's) and
+  libuv's loop, which wakes every task's timers, sleeps and IO; Julia
+  throws Ctrl-C as an `InterruptException` into the task on thread 1, at
+  its next safepoint, which a call into pandoc reaches only when it
+  returns. So when thread 1 is Julia's interactive thread, a call made
+  there runs in the default pool (`Threads.@spawn`) while the caller
+  waits; Ctrl-C reaches the caller, which cancels the call (its token, or
+  one of its own) and throws the `InterruptException` once it has stopped.
+  What you get, for `convert`, `read`, `write` and `read_many` made on
+  thread 1:
+
+  - **`julia` 1.12 or later with its default threads** (one interactive
+    thread, thread 1, and one default), **or `--threads=N`** (N default
+    and one interactive): in the REPL, and in code run with `-e` or after
+    `Base.exit_on_sigint(false)`, the call stops within milliseconds (0.01
+    to 0.04 s from the signal to the `catch`, measured): an
+    `InterruptException`. A script (`julia script.jl`, which exits on
+    Ctrl-C, Julia's default) exits at once, the call cancelled (Julia's
+    exit waits for a task of its own in the default pool, which the call
+    holds when it is that pool's only thread). The call's Julia filters
+    run in its task, on a thread of the default pool, which inherits the
+    caller's scoped values and logger.
+  - **`--threads=1` or `--threads=N,0`** (no interactive thread: thread 1
+    is in the default pool, where the call could run on thread 1 itself):
+    the call runs where it is made; Ctrl-C takes effect when it returns; a
+    script exits at once. A call on thread 1 holds up every timer, sleep
+    and IO wait in the process until it returns, a `Timer` meant to cancel
+    it included: cancel such a call from another thread.
+  - **The directory sandbox:** the same; the call is stopped from outside
+    (wasmtime's epoch), Lua included. A Ctrl-C or a cancel while
+    `libpandoc.wasm` is still loading (a process's first sandboxed call)
+    takes effect once it has loaded, before pandoc starts: measured, 0.9 s
+    after the call began from wasmtime's cache, 22 s at its first
+    compilation (minutes on a CI runner).
+  - **Windows:** the same arrangement, tested with a `CancelToken`; Ctrl-C
+    itself is not checked there (the tests can't send it).
+  - **Ctrl-C waits for the call to return** with `untrusted = true` (such
+    calls take no token), with `run`, and for a call made in a task on
+    another thread (`fetch(Threads.@spawn ...)`: Ctrl-C interrupts the
+    waiting, and the call goes on). `pandocjl` exits at once.
+
+  Running a call elsewhere costs about 18 µs (a tiny conversion: 0.344 ms
+  against 0.326 ms).
 - **Threads:** conversions from different tasks and threads run in
   parallel, on pandoc's own threads: one per logical core, or
   `$LIBPANDOC_NUM_THREADS`; `num_threads()`. `set_num_threads(n)` sets the

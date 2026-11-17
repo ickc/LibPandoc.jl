@@ -142,19 +142,30 @@ function _interruptible(f, cancel)
     own = cancel === nothing
     t = own ? CancelToken() : cancel
     result, failed = Ref{Any}(nothing), Ref{Any}(nothing)
+    # The caller wakes every 50 ms meanwhile and runs: Julia throws Ctrl-C
+    # into the task on thread 1 at its next safepoint, which a task asleep
+    # in `wait` may not reach until something wakes it (seen: with nothing
+    # to wake it, Ctrl-C came when the call ended, 18 s later; with a timer
+    # it didn't wait on, at once but once, on macOS, at the end). The call
+    # closes the timer when it ends, which wakes the caller at once.
+    awake = Timer(0.05; interval = 0.05)
     @lock _AWAY_LOCK push!(_AWAY, t)
     task = Threads.@spawn try
         result[] = f(t, own)
     catch e
         failed[] = e
+    finally
+        close(awake)
     end
-    # (a timer pending while it waits: without one, Ctrl-C reached this task
-    # only when the call ended, 18 s later in a test, and with one at once;
-    # found by experiment, not explained: outside this package, waiting on a
-    # task in a foreign call took Ctrl-C at its end with or without a timer)
-    awake = Timer(1; interval = 1)
     try
-        wait(task)
+        while !istaskdone(task)
+            isopen(awake) || (wait(task); break)
+            try
+                wait(awake)
+            catch
+                isopen(awake) && rethrow()   # (not the call's end: Ctrl-C)
+            end
+        end
     catch
         # Ctrl-C (or anything thrown at this task): the call stopped, then
         # thrown on

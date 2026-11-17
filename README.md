@@ -77,8 +77,10 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
   its next safepoint, which a call into pandoc reaches only when it
   returns. So when thread 1 is Julia's interactive thread, a call made
   there runs in the default pool (`Threads.@spawn`) while the caller
-  waits; Ctrl-C reaches the caller, which cancels the call (its token, or
-  one of its own) and throws the `InterruptException` once it has stopped.
+  waits, waking every 50 ms (a task asleep in `wait` took Ctrl-C only when
+  something woke it); Ctrl-C reaches the caller, which cancels the call
+  (its token, or one of its own) and throws the `InterruptException` once
+  it has stopped.
   What you get, for `convert`, `read`, `write` and `read_many` made on
   thread 1:
 

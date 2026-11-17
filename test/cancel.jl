@@ -137,10 +137,10 @@ end
 
 # Ctrl-C: SIGINT to a Julia process converting the slow document, timed
 # from the signal to the line saying what the process caught, the package
-# loaded and its call compiled before (a first load on a slow runner took
-# seconds). Only where the arrangement is: Julia with an interactive thread
-# (`julia`'s default since 1.12, `--threads=2`), POSIX (on Windows,
-# `kill(p, SIGINT)` is no Ctrl-C).
+# loaded and its call compiled before. The arrangement is an interactive
+# session's (`-i`) with an interactive thread (`julia`'s default since
+# 1.12, `--threads=2`). POSIX only (on Windows, `kill(p, SIGINT)` is no
+# Ctrl-C).
 const CTRL_C = """
     import LibPandoc
     Base.exit_on_sigint(EXIT)
@@ -156,13 +156,14 @@ const CTRL_C = """
     """
 
 # (process, the line after "started", the rest, seconds from the signal to that line)
-function interrupted(threads, exit_on_sigint, sandbox = nothing; slow = false)
+function interrupted(threads, exit_on_sigint, sandbox = nothing; interactive = true, slow = false)
     code = replace(CTRL_C, "EXIT" => repr(exit_on_sigint), "SANDBOX" => repr(sandbox))
     flag = threads === nothing ? `` : `--threads=$threads`
-    cmd = `$(Base.julia_cmd()) --startup-file=no $flag --project=$PROJECT -e $code`
+    i = interactive ? `-i --banner=no` : ``
+    cmd = `$(Base.julia_cmd()) --startup-file=no $flag $i --project=$PROJECT -e $code`
     out = Pipe()
     p = withenv("JULIA_NUM_THREADS" => nothing) do
-        Base.run(pipeline(cmd; stdout = out, stderr = devnull); wait = false)
+        Base.run(pipeline(cmd; stdin = devnull, stdout = out, stderr = devnull); wait = false)
     end
     close(out.in)
     @test readline(out) == "started"
@@ -191,14 +192,19 @@ else
             @test took < 4
         end
         # with no interactive thread (--threads=1, or 2,0): the call takes
-        # Ctrl-C when it returns (its time limit, 8 s); no crash
+        # Ctrl-C when it returns (its time limit, 8 s; which of the two the
+        # process then catches, or whether one comes after its catch, is
+        # Julia's timing); no crash
         p, line, rest, took = interrupted(1, false; slow = true)
-        @test success(p) && startswith(line, "caught InterruptException") && took > 5
-        # a script, which exits on SIGINT (Julia's default), with one thread
-        # in the default pool (the call's): at once, the call cancelled
-        # (Julia's exit waits for a task of its own in that pool)
-        p, line, rest, took = interrupted(nothing, true)
+        @test p.termsignal == 0 && took > 5
+        # a script, which exits on SIGINT (Julia's default), its call on
+        # thread 1: at once
+        p, line, rest, took = interrupted(nothing, true; interactive = false)
         @test p.termsignal == Base.SIGINT && took < 4
+        # not interactive (`-e`, a script) with exit_on_sigint(false): the
+        # call takes Ctrl-C when it returns
+        p, line, rest, took = interrupted(nothing, false; interactive = false, slow = true)
+        @test p.termsignal == 0 && took > 5
         # pandocjl, a command (`julia -m`, which Julia leaves throwing
         # InterruptException): at once too
         mktempdir() do d

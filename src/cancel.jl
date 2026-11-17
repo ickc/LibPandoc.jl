@@ -6,20 +6,24 @@
 # InterruptException into the task on thread 1, at its next safepoint. A
 # call into pandoc made there holds thread 1 until it returns: no timer
 # fires meanwhile, in any task (a `Timer` meant to cancel it included), and
-# Ctrl-C takes effect when it returns. So when thread 1 is Julia's
-# interactive thread (Julia's default since 1.12: `julia`, and
-# `--threads=N`, start one interactive thread, thread 1, beside the default
-# pool; NEWS for 1.12), a call made there runs in the default pool
-# (`Threads.@spawn`, which runs a task on that pool's threads only) while
-# the caller waits: Ctrl-C reaches the caller, which cancels the call's
-# token (one of its own if not given one), waits for the call to stop, and
-# throws the InterruptException on. Julia filters of such a call run in that
-# task, which inherits the caller's scoped values and logger. Without an
-# interactive thread (`--threads=1`, `--threads=N,0`: thread 1 in the
-# default pool, where the spawned call could run on thread 1 itself) the
-# call runs where it is made, and Ctrl-C takes effect when it returns.
-# Public API only (the threadpools, `Threads.@spawn`, `wait`, `Timer`,
-# `atexit`).
+# Ctrl-C takes effect when it returns. So in an interactive session (the
+# REPL, `julia -i`) when thread 1 is Julia's interactive thread (Julia's
+# default since 1.12: `julia`, and `--threads=N`, start one interactive
+# thread, thread 1, beside the default pool; NEWS for 1.12), a call made
+# there runs in the default pool (`Threads.@spawn`, which runs a task on
+# that pool's threads only) while the caller waits: Ctrl-C reaches the
+# caller, which cancels the call's token (one of its own if not given one),
+# waits for the call to stop, and throws the InterruptException on. Julia
+# filters of such a call run in that task, which inherits the caller's
+# scoped values and logger. Not in a script: Julia exits on Ctrl-C there,
+# by taking over thread 1 wherever it is, and with thread 1 waiting in its
+# scheduler that exit hung (once in a CI run on 1.12, in a 1.13 test of
+# Julia alone; from a call into pandoc it exits in milliseconds). Nor
+# without an interactive thread (`--threads=1`, `--threads=N,0`: thread 1
+# in the default pool, where the spawned call could run on thread 1
+# itself). There the call runs where it is made, and Ctrl-C takes effect
+# when it returns (a script's exit at once). Public API only (the
+# threadpools, `isinteractive`, `Threads.@spawn`, `wait`, `Timer`, `atexit`).
 
 """
     CancelToken()
@@ -47,11 +51,12 @@ LibPandoc.convert(text; to = "html", cancel = token)
 ```
 
 A call holding thread 1 holds up every timer in the process: where a call
-is made on thread 1 with no interactive thread (`julia --threads=1`), cancel
-it from another thread, not with a `Timer`.
+runs on thread 1 (a script's, or with `julia --threads=1`), cancel it from
+another thread, not with a `Timer`, or make it in a task of the default
+pool (`fetch(Threads.@spawn LibPandoc.convert(...))`).
 
-Ctrl-C stops a call made on thread 1 (the REPL's, a script's) when thread 1
-is Julia's interactive thread (`julia`'s default, and `--threads=N`): an
+In the REPL, Ctrl-C stops a call made on thread 1 when thread 1 is Julia's
+interactive thread (`julia`'s default, and `--threads=N`): an
 `InterruptException`. See the README's "Ctrl-C".
 """
 mutable struct CancelToken
@@ -110,8 +115,10 @@ function _with_token(opts, t, own::Bool)
 end
 
 # Whether a call made here runs in the default pool while this task waits
-# (above): on thread 1, when it is Julia's interactive thread.
-_elsewhere() = Threads.threadid() == 1 && Threads.threadpool() === :interactive && Threads.nthreads(:default) > 0
+# (above): in an interactive session, on thread 1, when it is Julia's
+# interactive thread.
+_elsewhere() = isinteractive() && Threads.threadid() == 1 && Threads.threadpool() === :interactive &&
+               Threads.nthreads(:default) > 0
 
 # The tokens of the calls running in the default pool for thread 1, once
 # each: cancelled when the process exits (`_on_exit`).
@@ -121,8 +128,9 @@ const _AWAY_LOCK = ReentrantLock()
 # An exit hook, run before Base's (hooks run last in, first out): Julia's
 # exit waits for a task of Base's in the default pool (its profile
 # listener's), which with one thread there (`julia`'s default) runs only
-# when a call in it returns. So a script's Ctrl-C, or `exit()` from another
-# task, would wait for the call; the calls are cancelled instead.
+# when a call in it returns. So `exit()` while a call runs there would wait
+# for it (seen with a script's Ctrl-C, when scripts' calls ran there too);
+# the calls are cancelled instead.
 function _on_exit()
     @lock _AWAY_LOCK foreach(cancel!, _AWAY)
     nothing
@@ -130,7 +138,7 @@ end
 
 """
 `f(token, own)`, a call into pandoc, stopped by `cancel` (a CancelToken or
-nothing) and, on thread 1 when Julia has an interactive thread, by Ctrl-C:
+nothing) and, in the REPL on an interactive thread 1, by Ctrl-C:
 there it runs in the default pool, with a token of its own if not given one
 (`own`), while this task waits.
 """

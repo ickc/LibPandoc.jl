@@ -75,42 +75,46 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
   libuv's loop, which wakes every task's timers, sleeps and IO; Julia
   throws Ctrl-C as an `InterruptException` into the task on thread 1, at
   its next safepoint, which a call into pandoc reaches only when it
-  returns. So when thread 1 is Julia's interactive thread, a call made
-  there runs in the default pool (`Threads.@spawn`) while the caller
-  waits, waking every 50 ms (a task asleep in `wait` took Ctrl-C only when
-  something woke it); Ctrl-C reaches the caller, which cancels the call
-  (its token, or one of its own) and throws the `InterruptException` once
-  it has stopped.
-  What you get, for `convert`, `read`, `write` and `read_many` made on
-  thread 1:
+  returns. So in the REPL, when thread 1 is Julia's interactive thread, a
+  call made there runs in the default pool (`Threads.@spawn`) while the
+  caller waits, waking every 50 ms (a task asleep in `wait` took Ctrl-C
+  only when something woke it); Ctrl-C reaches the caller, which cancels
+  the call (its token, or one of its own) and throws the
+  `InterruptException` once it has stopped. What you get, for `convert`,
+  `read`, `write` and `read_many` made on thread 1:
 
-  - **`julia` 1.12 or later with its default threads** (one interactive
-    thread, thread 1, and one default), **or `--threads=N`** (N default
-    and one interactive): in the REPL, and in code run with `-e` or after
-    `Base.exit_on_sigint(false)`, the call stops within milliseconds: an
-    `InterruptException` (measured: 0.01 to 0.04 s from the signal to the
-    `catch`; the REPL's prompt back 0.02 to 0.11 s after Ctrl-C). A script
-    (`julia script.jl`, which exits on Ctrl-C, Julia's default) exits at
-    once, the call cancelled (Julia's exit waits for a task of its own in
-    the default pool, which the call holds when it is that pool's only
-    thread). The call's Julia filters
-    run in its task, on a thread of the default pool, which inherits the
-    caller's scoped values and logger.
+  - **The REPL** (or `julia -i`), **Julia 1.12 or later with its default
+    threads** (one interactive thread, thread 1, and one default) **or
+    `--threads=N`** (N default and one interactive): the call stops within
+    a fraction of a second, an `InterruptException` (measured: the REPL's
+    prompt back 0.02 to 0.11 s after Ctrl-C; in `julia -i -e`, 0.31 to
+    0.36 s from the signal to the `catch`). The call's Julia filters run in its task, on a
+    thread of the default pool, which inherits the caller's scoped values
+    and logger; timers and IO in other tasks go on meanwhile.
+  - **A script** (`julia script.jl`, `-e`, `-m`; not interactive): the
+    call runs on thread 1. Julia exits at once on Ctrl-C, its default for
+    a script (0.10 to 0.11 s, measured); after
+    `Base.exit_on_sigint(false)` Ctrl-C takes effect when the call returns.
+    (Not run elsewhere there: Julia's exit on Ctrl-C takes thread 1 over
+    wherever it is, and with thread 1 waiting in Julia's scheduler that
+    exit hung, once in a CI run.)
   - **`--threads=1` or `--threads=N,0`** (no interactive thread: thread 1
     is in the default pool, where the call could run on thread 1 itself):
-    the call runs where it is made; Ctrl-C takes effect when it returns; a
-    script exits at once (the REPL's prompt came back when the call's time
-    limit stopped it). A call on thread 1 holds up every timer, sleep and
+    the call runs where it is made; in the REPL, Ctrl-C takes effect when
+    it returns (the prompt came back when the call's time limit stopped
+    it).
+  - Wherever a call runs on thread 1, it holds up every timer, sleep and
     IO wait in the process until it returns, a `Timer` meant to cancel it
-    included: cancel such a call from another thread.
+    included: cancel it from another thread, or make the call in a task of
+    the default pool (`fetch(Threads.@spawn LibPandoc.convert(...))`).
   - **The directory sandbox:** the same; the call is stopped from outside
     (wasmtime's epoch), Lua included. A Ctrl-C or a cancel while
     `libpandoc.wasm` is still loading (a process's first sandboxed call)
     takes effect once it has loaded, before pandoc starts: measured, 0.9 s
     after the call began from wasmtime's cache, 22 s at its first
     compilation (minutes on a CI runner).
-  - **Windows:** the same arrangement, tested with a `CancelToken`; Ctrl-C
-    itself is not checked there (the tests can't send it).
+  - **Windows:** the same; Ctrl-C itself is not checked there (the tests
+    can't send it), the token is.
   - **Ctrl-C waits for the call to return** with `untrusted = true` (such
     calls take no token), with `run`, and for a call made in a task on
     another thread (`fetch(Threads.@spawn ...)`: Ctrl-C interrupts the

@@ -23,7 +23,8 @@ Pandoc.convert("hi"; to = "html", filters = [upper])      # "<p>HI</p>\\n"
   README's "Security"; `\$LIBPANDOC_SANDBOX` for `run` and pandocjl).
   Failures throw `PandocError` (of kind `"Timeout"` past the time limit:
   `istimeout(e)`; `"Cancelled"`, stopped by a `CancelToken` given as
-  `cancel`: `iscancelled(e)`; Ctrl-C stops a call too: `InterruptException`);
+  `cancel`: `iscancelled(e)`; in the REPL Ctrl-C stops a call too:
+  `InterruptException`);
   pandoc's warnings are logged (`@warn`).
 - **Filters** (`filters = [...]`), in order, all in one pandoc run:
   - a Julia function with methods for the nodes to change, walked as

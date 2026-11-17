@@ -148,8 +148,10 @@ function _interruptible(f, cancel)
     catch e
         failed[] = e
     end
-    # (a timer pending: thread 1 then waits in libuv's loop, where Ctrl-C
-    # reaches this task; with none, Julia threw it only when the call ended)
+    # (a timer pending while it waits: without one, Ctrl-C reached this task
+    # only when the call ended, 18 s later in a test, and with one at once;
+    # found by experiment, not explained: outside this package, waiting on a
+    # task in a foreign call took Ctrl-C at its end with or without a timer)
     awake = Timer(1; interval = 1)
     try
         wait(task)

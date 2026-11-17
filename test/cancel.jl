@@ -95,9 +95,12 @@ end
     lua = joinpath(d, "forever.lua")
     Base.write(lua, "function Pandoc(doc) while true do end end\n")
     sandbox = (read = [d], timeout = LIMIT)
+    # (the filter as the module names it: on Windows C:\x is /c/x)
+    inside = replace(lua, '\\' => '/')
+    Sys.iswindows() && (inside = "/$(lowercase(inside[1]))$(inside[3:end])")
     @test P.convert("x"; to = "html", sandbox) == "<p>x</p>\n"   # (the module compiled)
     for f in ((t) -> P.convert(SLOW; to = "html", sandbox, cancel = t),
-              (t) -> P.convert("x"; to = "html", filters = [lua], sandbox, cancel = t))
+              (t) -> P.convert("x"; to = "html", filters = [inside], sandbox, cancel = t))
         t = CancelToken()
         c = cancel_after(t, 1)
         e, took = timed(() -> f(t))

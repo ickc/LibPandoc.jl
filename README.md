@@ -80,8 +80,8 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
   milliseconds (cancelling the call's token, or one of its own): an
   `InterruptException`. That needs a second thread, which the REPL has by
   default (one default and one interactive thread) and `julia --threads=2`
-  gives; with one thread (`--threads=1,0`) Ctrl-C takes effect when the
-  call returns. Julia filters of such a call run on that thread, in a task
+  gives; with one thread (`--threads=1,0`), and on Windows, Ctrl-C takes
+  effect when the call returns. Julia filters of such a call run on that thread, in a task
   inheriting the caller's scope and logger. Not for `untrusted = true`
   calls (no token), nor `run`. Measured: 0.35 s from the signal to the
   REPL's prompt; 15 µs a call.

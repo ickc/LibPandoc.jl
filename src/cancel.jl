@@ -106,6 +106,9 @@ end
 # precompiling.
 function _other_thread()
     Threads.threadid() == 1 || return nothing
+    # (not on Windows: the test run hung there in CI with this arrangement,
+    # cause not found; Ctrl-C then takes effect when the call returns)
+    Sys.iswindows() && return nothing
     ccall(:jl_generating_output, Cint, ()) == 0 || return nothing
     others = 2:Threads.maxthreadid()
     i = findfirst(t -> Threads.threadpool(t) === :default, others)

@@ -38,11 +38,20 @@ FLOOD(fd) = """
 
 const PROJECT = dirname(Base.active_project())
 
-# pandocjl ARGS as a separate process: (status, stdout, stderr)
+# pandocjl ARGS as a separate process: (status, stdout, stderr). One still
+# running after 5 minutes is killed (a status of its own, and what it wrote):
+# a child that hangs fails its test rather than the job's time limit (seen
+# once on Windows, in the directory sandbox, cause not found).
 function pandocjl(args...; input = "", env = Dict{String, String}(), dir = pwd())
     cmd = `$(Base.julia_cmd()) --startup-file=no --project=$PROJECT -m LibPandoc $args`
     out, err = IOBuffer(), IOBuffer()
-    p = cd(() -> Base.run(pipeline(ignorestatus(addenv(cmd, env)); stdin = IOBuffer(input), stdout = out, stderr = err)), dir)
+    p = cd(() -> Base.run(pipeline(ignorestatus(addenv(cmd, env)); stdin = IOBuffer(input), stdout = out, stderr = err);
+                          wait = false), dir)
+    if timedwait(() -> process_exited(p), 300) === :timed_out
+        @error "pandocjl $(join(args, ' ')) still running after 300 s: killed"
+        kill(p)
+    end
+    wait(p)
     # pandoc writes native line endings (CRLF on Windows) to files and stdout
     p.exitcode, replace(String(take!(out)), "\r\n" => "\n"), String(take!(err))
 end

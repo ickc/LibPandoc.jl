@@ -41,11 +41,15 @@ cancel_after(t, s) = Threads.@spawn (nap(s); cancel!(t))
     @test iscancelled(t)
     @test_throws ArgumentError P.convert("x"; cancel = 1)
 
-    # before: at once, and every call after
+    # before: at once, and every call after (each function run once first:
+    # a first call's compiling took over a second on a slow runner)
+    doc = P.read("x")
+    P.convert("x"); P.write(doc, "html"); P.read_many(["a", "b"])
     for f in (() -> P.convert(SLOW; timeout = LIMIT, cancel = t), () -> P.read("x"; cancel = t),
-              () -> P.write(P.read("x"), "html"; cancel = t), () -> P.read_many(["a", "b"]; cancel = t))
+              () -> P.write(doc, "html"; cancel = t), () -> P.read_many(["a", "b"]; cancel = t))
         e, took = timed(f)
-        @test iscancelled(e) && took < 1
+        @test iscancelled(e)
+        @test took < 1
     end
 
     # during, from another task: within about a second (the runtime

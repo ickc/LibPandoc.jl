@@ -634,12 +634,15 @@ else
     end
 
     @testset "Julia filters run here" begin
-        # in this process, inside the conversion, on the calling task; what
-        # they throw is a FilterError, as natively
+        # in this process, inside the conversion, on the task running the
+        # module (the calling task; on thread 1, with another thread, the
+        # task the call runs in there, for Ctrl-C); what they throw is a
+        # FilterError, as natively
         seen_by = []
         up(s::Str, ctx) = (push!(seen_by, (current_task(), ctx.conversion.format)); Str(uppercase(s.text)))
         @test P.convert("hello"; to = "plain", filters = [up], sandbox = (read = [lab.work],)) == "HELLO\n"
-        @test seen_by == [(current_task(), "plain")]
+        @test only(seen_by)[2] == "plain"
+        @test (only(seen_by)[1] === current_task()) == (P._other_thread() === nothing)
         boom(s::Str) = error("no")
         e = refused_with(() -> P.convert("hello"; to = "plain", filters = [boom], sandbox = (read = [lab.work],)))
         @test e isa FilterError && contains(sprint(showerror, e), "no")

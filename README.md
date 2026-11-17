@@ -42,7 +42,8 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
   relative path find nothing, and `$sourcefile$` names that file: give
   such documents as `input_files`.
 - **Errors** throw `PandocError`, with `kind` set to pandoc's error
-  constructor (`"PandocParseError"`, ...), or `"Timeout"`. pandoc's
+  constructor (`"PandocParseError"`, ...), or `"Timeout"`, or
+  `"Cancelled"`. pandoc's
   **warnings** are logged with `@warn`, `read_many`'s readers' too.
 - **Time limit:** `timeout = seconds` (libpandoc's option, for `convert`,
   `read`, `write`, `read_many`) stops a call still running after that
@@ -55,6 +56,35 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
   fails on its own (`return_exceptions = true` keeps the others'
   documents). No memory limit natively: for documents from someone you
   don't trust, the directory sandbox (below), which has both limits.
+- **Cancelling:** `cancel = token` (a `CancelToken()`) on the same
+  functions stops a call when `cancel!(token)` is called, from another
+  task or thread or from a filter: a `PandocError` of kind `"Cancelled"`
+  (`iscancelled(e)`, as libpandoc-rs's `is_cancelled()`; `iscancelled(token)`
+  too), the process going on. It stops what `timeout` stops (in the
+  directory sandbox, the whole conversion, Lua included). A token stays
+  cancelled, and serves any number of calls. `untrusted = true` options
+  take none (libpandoc's rule: a `PandocError`).
+
+  ```julia
+  token = CancelToken()
+  Timer(_ -> cancel!(token), 5)          # a cancel button, a deadline
+  LibPandoc.convert(text; to = "html", cancel = token)
+  ```
+
+  **Ctrl-C:** in a script Julia exits at once on Ctrl-C (its default).
+  Elsewhere (the REPL; a script with `Base.exit_on_sigint(false)`) Julia
+  throws `InterruptException` in the task on thread 1, at its next
+  safepoint, which a task inside a call into pandoc reaches only when the
+  call returns: so a call made on thread 1 runs on another thread (a task
+  pinned there, the caller waiting), and Ctrl-C stops it within
+  milliseconds (cancelling the call's token, or one of its own): an
+  `InterruptException`. That needs a second thread, which the REPL has by
+  default (one default and one interactive thread) and `julia --threads=2`
+  gives; with one thread (`--threads=1,0`) Ctrl-C takes effect when the
+  call returns. Julia filters of such a call run on that thread, in a task
+  inheriting the caller's scope and logger. Not for `untrusted = true`
+  calls (no token), nor `run`. Measured: 0.35 s from the signal to the
+  REPL's prompt; 15 µs a call.
 - **Threads:** conversions from different tasks and threads run in
   parallel, on pandoc's own threads: one per logical core, or
   `$LIBPANDOC_NUM_THREADS`; `num_threads()`. `set_num_threads(n)` sets the
@@ -301,7 +331,9 @@ filters), where the module tells of pandoc's own sandbox only.
 `$LIBPANDOC_WASM_MAX_MEMORY` (bytes, or with `k`, `m`, `g`), or for one
 call the sandbox's `timeout` and `max_memory` (bytes, an integer;
 `"max-memory"` in a `Dict`), stop a conversion past them, counted from the
-module's start; none by default (or 0), wasm's 4 GiB at most. A negative,
+module's start (as `cancel` and Ctrl-C stop it: from outside, wasmtime's
+epoch, which also brings other wasm runs' time limits one tick, 10 ms,
+nearer); none by default (or 0), wasm's 4 GiB at most. A negative,
 infinite or NaN one is an `ArgumentError`. A conversion stopped by the
 time limit throws a `PandocError` of kind `"Timeout"`, as one past
 libpandoc's `timeout` (which works inside too, but doesn't stop Lua); one

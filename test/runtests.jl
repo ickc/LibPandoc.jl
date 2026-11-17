@@ -678,6 +678,7 @@ end
     end
 end
 
+include("cancel.jl")
 include("sandbox.jl")
 include("confined_reads.jl")
 

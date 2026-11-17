@@ -132,6 +132,12 @@ formats, bytes for binary ones (docx, pdf, ...), and `""` when
 `filters` may mix pandoc's (Lua or JSON filter paths, `"citeproc"`) with
 Julia ones, in order, all inside the one pandoc run (see [`LibPandoc`](@ref)).
 
+`cancel = token` (a [`CancelToken`](@ref)) stops the conversion when the
+token is cancelled, from another task or a filter: a `PandocError` of kind
+`"Cancelled"`; Ctrl-C stops it (cancelling that token) on thread 1 when
+Julia has another thread (see `CancelToken`). They stop what `timeout`
+stops.
+
 libpandoc's own options: `untrusted = true` (for options from code you
 don't trust: only those that read, write, fetch and run nothing, with
 pandoc's sandbox on), and `timeout` (seconds): a conversion still running
@@ -155,16 +161,16 @@ LibPandoc.convert("*hi*"; from = "markdown", to = "html", filters = [upper])
 LibPandoc.convert(; input_files = ["a.md"], output_file = "a.docx")
 ```
 """
-function convert(input = nothing, options::AbstractDict = Dict{String, Any}(); kw...)
+function convert(input = nothing, options::AbstractDict = Dict{String, Any}(); cancel = nothing, kw...)
     opts = _options(options, kw)
     _input(input, opts)
     dirs = _sandbox_of(opts)
     out = if dirs !== nothing
-        _sandboxed_convert(opts, input, dirs)
+        _interruptible((t, _) -> _sandboxed_convert(opts, input, dirs, t), cancel)
     else
         cbs, entries = _plan(get(opts, "filters", ()), opts)
         isempty(cbs) || (opts = merge(opts, Dict("filters" => entries)))
-        _convert(_json(opts), input, cbs)
+        _interruptible((t, own) -> _convert(_json(_with_token(opts, t, own)), input, cbs), cancel)
     end
     # (output-file null or "-": pandoc's standard output, which is `out`)
     get(opts, "output-file", nothing) isa AbstractString && opts["output-file"] != "-" && return ""
@@ -195,17 +201,17 @@ end
 
 Parse `text` (a string or bytes; `nothing` for the options'
 `input_files`) into a document, converting as [`convert`](@ref) does
-(filters, `timeout`, ...) to pandoc's JSON. The format is an argument or
+(filters, `timeout`, `cancel`, ...) to pandoc's JSON. The format is an argument or
 the option `from` (or `reader`), not both. Given the conversion a filter
 runs in (`ctx.conversion`), read it the way that conversion reads its
 input, as [`read_many`](@ref) does: for a filter that parses a fragment.
 """
-function read(text, from::Union{Nothing, AbstractString} = nothing; kw...)
+function read(text, from::Union{Nothing, AbstractString} = nothing; cancel = nothing, kw...)
     opts = _options(Dict{String, Any}(), kw)
     _refuse(opts, ("to", "writer", "output-file"), "read (its output is the document)")
     _format!(opts, from, ("from", "reader"), "markdown")
     opts["to"] = "json"
-    Panir.parse(convert(text, opts))
+    Panir.parse(convert(text, opts; cancel))
 end
 
 read(text, c::Conversion; kw...) = only(read_many([text], c; kw...))
@@ -226,7 +232,8 @@ file not found) are logged, as `convert`'s.
 
 A text that can't be read throws its `PandocError` (the first one's); with
 `return_exceptions = true` each such error is in the result in its text's
-place instead, the others' documents kept.
+place instead, the others' documents kept. `cancel = token` and Ctrl-C stop
+it as a whole, as `convert`.
 
 ```julia
 cells(b::CodeBlock, ctx) =
@@ -234,7 +241,7 @@ cells(b::CodeBlock, ctx) =
 ```
 """
 function read_many(texts, from::Union{Nothing, AbstractString, Conversion} = nothing;
-                   return_exceptions::Bool = false, kw...)
+                   return_exceptions::Bool = false, cancel = nothing, kw...)
     texts isa Union{AbstractString, AbstractVector{UInt8}} &&
         throw(ArgumentError("read_many takes texts, not one: read_many([text])"))
     opts = _options(Dict{String, Any}(), kw)
@@ -251,7 +258,9 @@ function read_many(texts, from::Union{Nothing, AbstractString, Conversion} = not
         throw(PandocError("PandocOptionError", "read_many: a directory sandbox is for conversions " *
                                                "(\"sandbox\": true reads no files)"))
     inputs = String[t isa AbstractVector{UInt8} ? String(copy(t)) : String(t) for t in texts]
-    out = JSON.parse(String(_read_many(_json(Dict("options" => opts, "inputs" => inputs)))))
+    out = JSON.parse(String(_interruptible(cancel) do t, own
+        _read_many(_json(Dict("options" => _with_token(opts, t, own), "inputs" => inputs)))
+    end))
     docs = Any[]
     for (i, j) in enumerate(out)
         if haskey(j, "error")
@@ -336,12 +345,13 @@ end
     LibPandoc.write(doc::Panir.Pandoc, to = "html"; options...)
 
 Render a document, as `convert` from JSON would. The format is an argument
-or the option `to` (or `writer`), not both.
+or the option `to` (or `writer`), not both; options (`timeout`, `cancel`,
+...) as `convert`'s.
 """
-function write(doc::Panir.Pandoc, to::Union{Nothing, AbstractString} = nothing; kw...)
+function write(doc::Panir.Pandoc, to::Union{Nothing, AbstractString} = nothing; cancel = nothing, kw...)
     opts = _options(Dict{String, Any}(), kw)
     _refuse(opts, ("from", "reader", "input-files"), "write (its input is the document)")
     _format!(opts, to, ("to", "writer"), "html")
     opts["from"] = "json"
-    convert(Panir.serialize(doc), opts)
+    convert(Panir.serialize(doc), opts; cancel)
 end

@@ -141,6 +141,9 @@ struct _Syms
     query::Ptr{Cvoid}
     result_free::Ptr{Cvoid}
     buffer_set::Ptr{Cvoid}
+    cancel_token_new::Ptr{Cvoid}
+    cancel::Ptr{Cvoid}
+    cancel_token_free::Ptr{Cvoid}
 end
 
 const _SYMS = _Once{_Syms}()
@@ -173,11 +176,13 @@ function _load()
         path = library_path()
         h = Libdl.dlopen(path)
         f(name) = Libdl.dlsym(h, Symbol("pandoc_", name))
+        # before anything else: an older library's meanings differ (and it
+        # lacks the newer functions)
+        _abi_check(ccall(f(:abi_version), Cint, ()), path)
         s = _Syms((f(n) for n in (:init, :abi_version, :set_num_threads, :convert, :convert_args,
                                    :convert_filters, :convert_args_filters, :main, :read_many,
-                                   :query, :result_free, :buffer_set))...)
-        # before anything else: an older library's meanings differ
-        _abi_check(ccall(s.abi_version, Cint, ()), path)
+                                   :query, :result_free, :buffer_set, :cancel_token_new, :cancel,
+                                   :cancel_token_free))...)
         ccall(s.init, Cint, ()) == 0 || error("libpandoc: the Haskell runtime didn't start")
         _SYMS[] = s
     end

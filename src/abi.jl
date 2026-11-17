@@ -5,7 +5,8 @@
 
 A pandoc failure. `kind` is pandoc's error constructor, e.g.
 `"PandocParseError"` or `"PandocUnknownReaderError"`, `"Timeout"` for a
-call stopped by its time limit ([`istimeout`](@ref)), or `"Exception"`;
+call stopped by its time limit ([`istimeout`](@ref)), `"Cancelled"` for one
+stopped by its [`CancelToken`](@ref) ([`iscancelled`](@ref)), or `"Exception"`;
 `message` is what the pandoc command would print.
 
 ```julia
@@ -213,8 +214,9 @@ function _with_callbacks(f, cbs::Vector{_Callback})
 end
 
 # What a filter threw, as the call throws it: a FilterError, but a time
-# limit's PandocError as it is (a script stopped as pandoc stops a JSON filter).
-_filter_error(e, bt) = istimeout(e) ? e : FilterError(e, bt)
+# limit's PandocError as it is (a script stopped as pandoc stops a JSON
+# filter), and a cancel's (a call the filter made, stopped with its conversion).
+_filter_error(e, bt) = istimeout(e) || iscancelled(e) ? e : FilterError(e, bt)
 
 # -- the calls -------------------------------------------------------------------------
 

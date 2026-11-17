@@ -25,7 +25,8 @@
 # `libpandoc.filter`), a wasm filter seeing the same directories. They are
 # told that the conversion is sandboxed (the context's "sandbox",
 # PANDOC_SANDBOX: true, where the module tells of pandoc's own sandbox only),
-# so that what they read through pandoc is read in its sandbox.
+# so that what they read through pandoc is read in its sandbox. A cancel
+# token stops the module from outside, as the time limit does.
 #
 # Threads: the module runs on the calling task, and the filters it calls
 # back run there too, inside wasmtime's call. wasmtime keeps per-thread
@@ -415,9 +416,10 @@ Run `call` in a fresh instance of the module seeing the mounts:
 index in its "filters"), `(:args, argv)` (pandoc_convert_args) or `(:main,
 argv, filters_json)` (pandoc_main): (status, output, kind, message, log),
 `output` etc. empty for :main. A callback's exception is thrown after it
-returns, as natively; a limit met, a PandocError.
+returns, as natively; a limit met, or `token` (a CancelToken) cancelled, a
+PandocError.
 """
-function _sandbox_run(m::_Mounts, dirs::_Dirs, call, input, cbs::Vector{_Callback})
+function _sandbox_run(m::_Mounts, dirs::_Dirs, call, input, cbs::Vector{_Callback}, token = nothing)
     timeout, max_memory = _sandbox_limits(dirs)
     mod, linker = _sandbox_module()
     w = _wasmtime()
@@ -443,11 +445,13 @@ function _sandbox_run(m::_Mounts, dirs::_Dirs, call, input, cbs::Vector{_Callbac
     run = _SandboxRun(cbs)
     store = @ccall libwasmtime.wasmtime_store_new(w.engine::Ptr{Cvoid}, pointer_from_objref(run)::Ptr{Cvoid}, C_NULL::Ptr{Cvoid})::Ptr{Cvoid}
     started = _now()
+    watch = token === nothing ? nothing : _Watch(token, timeout === nothing ? nothing : started + timeout, nothing)
     function body()
         ctx = @ccall libwasmtime.wasmtime_store_context(store::Ptr{Cvoid})::Ptr{Cvoid}
         @ccall libwasmtime.wasmtime_store_limiter(store::Ptr{Cvoid}, something(max_memory, -1)::Int64,
                                                   (-1)::Int64, (-1)::Int64, (-1)::Int64, (-1)::Int64)::Cvoid
         @ccall libwasmtime.wasmtime_context_set_epoch_deadline(ctx::Ptr{Cvoid}, UInt64(ticks)::UInt64)::Cvoid
+        watch === nothing || _watch!(store, ctx, watch)
         _stop_on(@ccall libwasmtime.wasmtime_context_set_wasi(ctx::Ptr{Cvoid}, wasi::Ptr{Cvoid})::Ptr{Cvoid})
         inst = Ref{NTuple{2, UInt64}}()
         trap = Ref{Ptr{Cvoid}}(C_NULL)
@@ -459,11 +463,14 @@ function _sandbox_run(m::_Mounts, dirs::_Dirs, call, input, cbs::Vector{_Callbac
     end
     # (the store's data alive meanwhile; the task on this thread, and alone
     # in wasm on it with callbacks: above, "Threads")
-    pinned() = GC.@preserve run _blocking(() -> _pinned(body))
+    pinned() = GC.@preserve run watch _blocking(() -> _pinned(body))
     result = try
         timeout === nothing ? pinned() : _with_clock(pinned, w)
     catch e
         e isa _Stopped || rethrow()
+        reason = watch === nothing ? nothing : @atomic watch.reason
+        reason === :cancelled && throw(PandocError("Cancelled", _CANCELLED))
+        reason === :timeout && (e = _Stopped(e.message, true, nothing))
         throw(_stopped(e, dirs, timeout, max_memory, started))
     finally
         @ccall libwasmtime.wasmtime_store_delete(store::Ptr{Cvoid})::Cvoid
@@ -569,14 +576,15 @@ function _sandbox_take((status, out, kind, msg, log), m::_Mounts)
 end
 
 # `convert` in the sandbox: the options as they are but for "sandbox", the
-# filters of this process called back.
-function _sandboxed_convert(opts, input, dirs::_Dirs)
+# filters of this process called back; stopped from outside when `token` is
+# cancelled.
+function _sandboxed_convert(opts, input, dirs::_Dirs, token = nothing)
     m = _Mounts(dirs)
     try
         cbs, entries = _plan(get(opts, "filters", ()), opts; mounts = m)
         o = Dict{String, Any}(k => v for (k, v) in opts if k != "sandbox")
         isempty(cbs) || (o["filters"] = entries)
-        _sandbox_take(_sandbox_run(m, dirs, (:options, _json(o)), _bytes(input), cbs), m)
+        _sandbox_take(_sandbox_run(m, dirs, (:options, _json(o)), _bytes(input), cbs, token), m)
     finally
         _close(m)
     end

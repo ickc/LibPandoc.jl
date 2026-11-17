@@ -141,8 +141,10 @@ function _subprocess(path, json::String, context, deadline = nothing)
     c = _conversion(context, nothing)
     fmt = something(c.format, "")
     env = copy(ENV)
-    # a format libpandoc doesn't know is unset, as for a wasm filter
-    delete!(env, "PANDOC_INPUT_FORMAT"), delete!(env, "PANDOC_OUTPUT_FORMAT"), delete!(env, "PANDOC_WRITER_OPTIONS")
+    # what its conversion doesn't say is unset, as for a wasm filter: none
+    # of this process's
+    foreach(k -> delete!(env, k), ("PANDOC_INPUT_FORMAT", "PANDOC_OUTPUT_FORMAT", "PANDOC_WRITER_OPTIONS",
+                                   "PANDOC_SANDBOX"))
     merge!(env, Dict(_filter_env(c)))
     env["JULIA_LOAD_PATH"] = join(Base.load_path(), Sys.iswindows() ? ';' : ':')
     cmd = `$(Base.julia_cmd()) --startup-file=no $path $fmt`

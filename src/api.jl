@@ -274,12 +274,13 @@ const _READ_MANY_OPTIONS = ("from", "reader", "abbreviations", "data-dir", "defa
 # The conversion's options that also apply to reading a fragment of it.
 const _READ_OPTIONS = ("abbreviations", "data-dir", "default-image-extension", "indented-code-classes",
                        "resource-path", "strip-comments", "tab-stop", "track-changes")
-# Whether a conversion is sandboxed, for what a filter reads through it; with
-# no options, that can't be told: sandboxed, failing closed.
+# Whether a conversion is sandboxed, for what a filter reads through it:
+# told so, or its options ask for it, or nothing can tell (no `sandbox`, no
+# options): failing closed.
 function _sandboxed(c::Conversion)
-    c.options === nothing && return true
-    s = get(c.options, "sandbox", nothing)
-    !(s === nothing || s === false)
+    s = c.options === nothing ? nothing : get(c.options, "sandbox", nothing)
+    asked = !(s === nothing || s === false)
+    c.sandbox === true || asked || (c.sandbox === nothing && c.options === nothing)
 end
 
 # Reader options (as pandoc gives filters) that have a defaults-file key.
@@ -296,11 +297,12 @@ reading; not filters, templates, metadata or the output.
 When the conversion is sandboxed, or when that can't be told, a fragment
 is read in pandoc's own sandbox (`"sandbox" => true`: it reads no files,
 as LaTeX's `\\input` or an RST or Org include would). A conversion is
-sandboxed when its options' `"sandbox"` is `true` or a directory sandbox
-(whose filters run in this process, outside it); it can't be told for a
-conversion with no options: pandocjl's (pandoc doesn't tell its filters
-about `--sandbox`, on the command line or in a defaults file), a script's
-run as a subprocess (made from its environment), one made by hand. And
+sandboxed when its `sandbox` is `true` (pandoc's sandbox is on, however it
+was set: libpandoc 1.13 tells its filters; a directory sandbox, whose
+filters run in this process outside it, says so too), or its options ask
+for a sandbox (`"sandbox"`: `true` or a directory sandbox); it can't be
+told when its `sandbox` is `nothing` and it has no options (one made by
+hand, or from the environment under plain pandoc). And
 the text is read as given, its tabs kept (`"preserve-tabs" => true`), as
 Lua's `pandoc.read` reads it: the `pandoc` command first replaces them by
 spaces. Options given to `read` or `read_many` beside the conversion win

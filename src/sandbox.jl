@@ -22,7 +22,10 @@
 # The options and arguments go to pandoc untouched. Lua filters run inside;
 # JSON filters (programs) fail, as a PDF engine does; Julia filters and wasm
 # filters run in this process, called back by the module (its import
-# `libpandoc.filter`), a wasm filter seeing the same directories.
+# `libpandoc.filter`), a wasm filter seeing the same directories. They are
+# told that the conversion is sandboxed (the context's "sandbox",
+# PANDOC_SANDBOX: true, where the module tells of pandoc's own sandbox only),
+# so that what they read through pandoc is read in its sandbox.
 #
 # Threads: the module runs on the calling task, and the filters it calls
 # back run there too, inside wasmtime's call. wasmtime keeps per-thread
@@ -376,7 +379,12 @@ function _import_filter(env::Ptr{Cvoid}, caller::Ptr{Cvoid}, args::Ptr{UInt64}, 
             cb = run.cbs[i + 1]
             try
                 d, c = _guest_bytes(caller, doc, dl), _guest_bytes(caller, ctx, cl)
-                result = Base.invokelatest(cb.run, String(d), JSON.parse(String(c)))
+                # told that the conversion is sandboxed: the module tells only
+                # of pandoc's own sandbox, and a filter here runs outside it,
+                # so that what it reads through pandoc is read in its sandbox
+                context = Dict{String, Any}(JSON.parse(String(c)))
+                context["sandbox"] = true
+                result = Base.invokelatest(cb.run, String(d), context)
                 status, answer = Int32(0), result isa AbstractString ? codeunits(String(result)) : result::AbstractVector{UInt8}
             catch e
                 cb.error === nothing && (cb.error = (e, catch_backtrace()))

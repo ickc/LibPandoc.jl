@@ -163,7 +163,8 @@ The environment variables a JSON filter run by libpandoc gets: pandoc's
 (`PANDOC_VERSION`, `PANDOC_READER_OPTIONS`) and libpandoc's (the formats
 with extensions, `PANDOC_WRITER_OPTIONS`: without `variables` if it would
 be longer than 32,000 bytes, an environment variable's limit on Windows,
-as libpandoc does).
+as libpandoc does; `PANDOC_SANDBOX`, `"true"` or `"false"`, whether the
+conversion is sandboxed: true in the directory sandbox).
 """
 function _filter_env(c::Conversion)
     env = ["PANDOC_VERSION" => _version_string(),
@@ -176,6 +177,7 @@ function _filter_env(c::Conversion)
         sizeof(text) > 32_000 && (text = JSON.json(Dict(k => v for (k, v) in w if k != "variables")))
         push!(env, "PANDOC_WRITER_OPTIONS" => text)
     end
+    c.sandbox === nothing || push!(env, "PANDOC_SANDBOX" => string(c.sandbox))
     env
 end
 

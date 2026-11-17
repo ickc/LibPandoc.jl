@@ -459,6 +459,9 @@ function _sandbox_run(m::_Mounts, dirs::_Dirs, call, input, cbs::Vector{_Callbac
                                                   (-1)::Int64, (-1)::Int64, (-1)::Int64, (-1)::Int64)::Cvoid
         @ccall libwasmtime.wasmtime_context_set_epoch_deadline(ctx::Ptr{Cvoid}, UInt64(ticks)::UInt64)::Cvoid
         watch === nothing || _watch!(store, ctx, watch)
+        # (a cancel before the store was watched, while the module loaded,
+        # moved the epoch when nothing looked at it)
+        watch === nothing || !iscancelled(watch.token) || throw(PandocError("Cancelled", _CANCELLED))
         _stop_on(@ccall libwasmtime.wasmtime_context_set_wasi(ctx::Ptr{Cvoid}, wasi::Ptr{Cvoid})::Ptr{Cvoid})
         inst = Ref{NTuple{2, UInt64}}()
         trap = Ref{Ptr{Cvoid}}(C_NULL)

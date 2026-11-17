@@ -118,9 +118,20 @@ end
     t = CancelToken()
     cancel!(t)
     @test iscancelled(timed(() -> P.convert("x"; sandbox, cancel = t))[1])
+    # cancelled once the call has begun but before the store is watched
+    # (while the module loads): stopped when it is, with no time limit (no
+    # clock moving the epoch after the cancel's own move)
+    e, took = timed(() -> P._sandboxed_convert(Dict{String, Any}("to" => "html"), SLOW,
+                                                P._sandbox_of(Dict("sandbox" => (read = String[], timeout = 0))), t))
+    @test iscancelled(e) && took < 4
 end
 
-# Ctrl-C: SIGINT to a Julia process converting the slow document. (POSIX)
+# Ctrl-C: SIGINT to a Julia process converting the slow document, timed
+# from the signal to the line saying what the process caught, the package
+# loaded and its call compiled before (a first load on a slow runner took
+# seconds). Only where the arrangement is: Julia with an interactive thread
+# (`julia`'s default since 1.12, `--threads=2`), POSIX (on Windows,
+# `kill(p, SIGINT)` is no Ctrl-C).
 const CTRL_C = """
     import LibPandoc
     Base.exit_on_sigint(EXIT)

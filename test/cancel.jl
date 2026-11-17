@@ -123,7 +123,9 @@ end
     # clock moving the epoch after the cancel's own move)
     e, took = timed(() -> P._sandboxed_convert(Dict{String, Any}("to" => "html"), SLOW,
                                                 P._sandbox_of(Dict("sandbox" => (read = String[], timeout = 0))), t))
-    @test iscancelled(e) && took < 4
+    iscancelled(e) || @info "not cancelled" e
+    @test iscancelled(e)
+    @test took < 4
 end
 
 # Ctrl-C: SIGINT to a Julia process converting the slow document, timed

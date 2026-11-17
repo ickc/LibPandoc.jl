@@ -110,13 +110,15 @@ _bytes(x::AbstractVector{UInt8}) = x
 # yields, no other task on this thread may start such a call: that one's
 # callbacks could yield too, and the two calls would then return to pandoc
 # out of order. Calls without callbacks never yield, so need neither.
+#
+# The task is made sticky meanwhile (`Task.sticky`, what `@async` sets):
+# Julia's scheduler puts a sticky task that yielded back on the thread it
+# ran on. Julia has no documented call for this; the "threads" test (tasks
+# of `Threads.@spawn` whose filter yields) crashes without it.
 function _pinned(f)
     t = current_task()
     sticky = t.sticky
-    if !sticky
-        t.sticky = true
-        ccall(:jl_set_task_tid, Cint, (Any, Cint), t, Threads.threadid() - 1)
-    end
+    t.sticky = true
     tid = Threads.threadid()
     l = tid <= length(_THREAD_LOCKS) ? _THREAD_LOCKS[tid] : nothing
     try
@@ -225,12 +227,22 @@ _filter_error(e, bt) = istimeout(e) || iscancelled(e) ? e : FilterError(e, bt)
 # the flag with the originals). Code that writes to them as C does gives up
 # at the first EAGAIN, when the pipe is full (64 KiB on Linux): a Lua
 # filter's `io.stdout:write` returned nil and "Resource temporarily
-# unavailable", the rest lost; a JSON filter or a PDF engine inheriting them
-# fails likewise; WASI's inherited streams in the directory sandbox failed
-# with "hardware fault". (GHC's runtime, pandoc's own output, waits.) So they
-# are blocking while pandoc runs, as for any other program, and as they were
-# once no call runs. Julia's own writes to them meanwhile block too (the
-# copies share the flag) rather than being queued. (Windows: no such mode.)
+# unavailable", the rest lost; a JSON filter inheriting standard error
+# failed likewise (Python: BlockingIOError); WASI's inherited streams in the
+# directory sandbox failed with "hardware fault". (GHC's runtime, pandoc's
+# own output, waits.) So they are blocking while pandocjl's pandoc runs (the
+# process is pandoc's command then) and while the sandbox's module does
+# (which fails otherwise), as for any other program, and as they were once
+# none runs. Julia's own writes to them meanwhile block too (the copies
+# share the flag) rather than being queued.
+#
+# Not around a library call outside the sandbox: the streams are the
+# program's, and one that reads its own standard output (`redirect_stdout()`,
+# as test and documentation tools do) in a task of the thread the call holds
+# would wait forever on a write the pipe can't hold (seen: 200,000 bytes
+# from a Lua filter, and from one `print` of a Julia filter, which Julia
+# writes whole when left alone; Lua's is cut either way). (Windows: no such
+# mode.)
 const _O_NONBLOCK = Sys.isapple() || Sys.isbsd() ? Cint(0x0004) : Cint(0x0800)
 const _STD_LOCK = ReentrantLock()
 const _STD_FLAGS = Cint[]   # the streams' flags before, while calls go on
@@ -262,13 +274,13 @@ function _convert(options::AbstractString, input, cbs::Vector{_Callback} = _Call
     s = _load()
     inp = _bytes(input)
     inptr, inlen = inp === nothing ? (C_NULL, 0) : (pointer(inp), length(inp))
-    isempty(cbs) && return GC.@preserve options inp take(_blocking(() ->
+    isempty(cbs) && return GC.@preserve options inp take(
         @ccall gc_safe = true $(s.convert)(options::Cstring, sizeof(options)::Csize_t,
-                                           inptr::Ptr{UInt8}, inlen::Csize_t)::Ptr{_Result}))
+                                           inptr::Ptr{UInt8}, inlen::Csize_t)::Ptr{_Result})
     _with_callbacks(cbs) do fs
-        GC.@preserve options inp _take(_blocking(() ->
+        GC.@preserve options inp _take(
             @ccall gc_safe = true $(s.convert_filters)(options::Cstring, sizeof(options)::Csize_t,
-                inptr::Ptr{UInt8}, inlen::Csize_t, fs::Ptr{_Filter}, length(fs)::Csize_t)::Ptr{_Result}))
+                inptr::Ptr{UInt8}, inlen::Csize_t, fs::Ptr{_Filter}, length(fs)::Csize_t)::Ptr{_Result})
     end
 end
 
@@ -286,9 +298,9 @@ function _convert_args(args::AbstractVector{<:AbstractString}, input)
     inptr, inlen = inp === nothing ? (C_NULL, 0) : (pointer(inp), length(inp))
     argv = _argv(args)
     ptrs = map(pointer, argv)
-    GC.@preserve argv ptrs inp _take(_blocking(() ->
+    GC.@preserve argv ptrs inp _take(
         @ccall gc_safe = true $(s.convert_args)(length(argv)::Cint, ptrs::Ptr{Ptr{UInt8}},
-                                                inptr::Ptr{UInt8}, inlen::Csize_t)::Ptr{_Result}))
+                                                inptr::Ptr{UInt8}, inlen::Csize_t)::Ptr{_Result})
 end
 
 function _read_many(request::AbstractString; take = _take)

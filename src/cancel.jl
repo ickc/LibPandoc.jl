@@ -170,8 +170,10 @@ function _interruptible(f, cancel)
             isopen(awake) || (wait(task); break)
             try
                 wait(awake)
-            catch
-                isopen(awake) && rethrow()   # (not the call's end: Ctrl-C)
+            catch e
+                # (the call's end closes the timer, which throws here; a
+                # Ctrl-C that came with it is still thrown on)
+                (e isa InterruptException || isopen(awake)) && rethrow()
             end
         end
     catch

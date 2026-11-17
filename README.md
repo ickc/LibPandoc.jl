@@ -88,9 +88,10 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
     `--threads=N`** (N default and one interactive): the call stops within
     a fraction of a second, an `InterruptException` (measured: the REPL's
     prompt back 0.02 to 0.11 s after Ctrl-C; in `julia -i -e`, 0.31 to
-    0.36 s from the signal to the `catch`). The call's Julia filters run in its task, on a
-    thread of the default pool, which inherits the caller's scoped values
-    and logger; timers and IO in other tasks go on meanwhile.
+    0.36 s from the signal to the `catch`). The call's Julia filters run
+    in its task, on a thread of the default pool, which inherits the
+    caller's scoped values and logger (not its task-local storage); timers
+    and IO in other tasks go on meanwhile.
   - **A script** (`julia script.jl`, `-e`, `-m`; not interactive): the
     call runs on thread 1. Julia exits at once on Ctrl-C, its default for
     a script (0.10 to 0.11 s, measured); after
@@ -127,14 +128,23 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
   `$LIBPANDOC_NUM_THREADS`; `num_threads()`. `set_num_threads(n)` sets the
   number only before pandoc first runs something in parallel (it grows to
   it then, once), and returns the number in effect.
-- **Standard streams:** while a call into pandoc runs, this process's
-  standard input, output and error are in blocking mode, as for any other
-  program, and back as they were when no call runs. Julia's libuv puts a
-  pipe there in non-blocking mode, in which a Lua filter's `io.stdout:write`
-  stopped at a full pipe (64 KiB, `EAGAIN`), the rest lost, and a JSON
-  filter or a PDF engine inheriting it could fail likewise. Julia's own
-  writes to them meanwhile (a Julia filter's `println`) wait for the
-  reader rather than being queued. (Not on Windows, which has no such mode.)
+- **Standard streams:** Julia's libuv puts a pipe on standard input,
+  output or error in non-blocking mode, in which whatever writes to it as C
+  does stops at a full pipe (64 KiB on Linux, `EAGAIN`): a Lua filter's
+  `io.stdout:write` returns `nil` and the error, the rest not written, and
+  a JSON filter writing to the standard error it inherits fails likewise
+  (Python's `BlockingIOError`). `pandocjl` puts them in blocking mode while
+  pandoc runs, as for any other program, and the directory sandbox while
+  its module runs (WASI's streams fail otherwise), and back as they were
+  after; Julia's own writes to them meanwhile (a Julia filter's `println`)
+  wait for the reader rather than being queued. A library call outside the
+  sandbox leaves them as Julia has them (they are the program's): so a Lua
+  filter of such a call that writes much to a pipe checks what
+  `io.stdout:write` returns, or writes to a file. Blocking, a program that
+  reads its own standard output (`redirect_stdout()`, as test and
+  documentation tools do) in a task of the thread the call holds would
+  wait forever on a write the pipe can't hold, as it does in the directory
+  sandbox. (Not on Windows, which has no such mode.)
 - **Untrusted options:** `untrusted = true` accepts only options that read
   no files, write none, fetch nothing and run nothing, with pandoc's
   sandbox on (libpandoc's list; anything else throws a `PandocError`

@@ -368,7 +368,7 @@ exists, a container at least, a virtual machine better.
 
 ## Installing
 
-LibPandoc.jl needs Julia 1.12 or later, and libpandoc 1.11 or a later
+LibPandoc.jl needs Julia 1.12 or later, and libpandoc 1.13 or a later
 1.x (its ABI version, checked when the library is loaded). It finds libpandoc:
 `$LIBPANDOC_PATH` (the library), else `$LIBPANDOC_PREFIX` or
 `$CONDA_PREFIX` (a prefix with `lib/libpandoc.so`, `.dylib`, or

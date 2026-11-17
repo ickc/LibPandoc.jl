@@ -149,7 +149,7 @@ const _LOAD_LOCK = ReentrantLock()
 # The ABI version this package relies on (libpandoc.h): a library with the
 # same major and a minor at least this one works (libpandoc.h, Versions).
 const ABI_MAJOR = 1
-const ABI_MINOR = 11
+const ABI_MINOR = 13
 
 # Whether a library's pandoc_abi_version() is one this package works with.
 _abi_ok(v::Integer) = v ÷ 1000 == ABI_MAJOR && v % 1000 >= ABI_MINOR

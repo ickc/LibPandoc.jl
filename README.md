@@ -85,20 +85,22 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
   - **`julia` 1.12 or later with its default threads** (one interactive
     thread, thread 1, and one default), **or `--threads=N`** (N default
     and one interactive): in the REPL, and in code run with `-e` or after
-    `Base.exit_on_sigint(false)`, the call stops within milliseconds (0.01
-    to 0.04 s from the signal to the `catch`, measured): an
-    `InterruptException`. A script (`julia script.jl`, which exits on
-    Ctrl-C, Julia's default) exits at once, the call cancelled (Julia's
-    exit waits for a task of its own in the default pool, which the call
-    holds when it is that pool's only thread). The call's Julia filters
+    `Base.exit_on_sigint(false)`, the call stops within milliseconds: an
+    `InterruptException` (measured: 0.01 to 0.04 s from the signal to the
+    `catch`; the REPL's prompt back 0.02 to 0.11 s after Ctrl-C). A script
+    (`julia script.jl`, which exits on Ctrl-C, Julia's default) exits at
+    once, the call cancelled (Julia's exit waits for a task of its own in
+    the default pool, which the call holds when it is that pool's only
+    thread). The call's Julia filters
     run in its task, on a thread of the default pool, which inherits the
     caller's scoped values and logger.
   - **`--threads=1` or `--threads=N,0`** (no interactive thread: thread 1
     is in the default pool, where the call could run on thread 1 itself):
     the call runs where it is made; Ctrl-C takes effect when it returns; a
-    script exits at once. A call on thread 1 holds up every timer, sleep
-    and IO wait in the process until it returns, a `Timer` meant to cancel
-    it included: cancel such a call from another thread.
+    script exits at once (the REPL's prompt came back when the call's time
+    limit stopped it). A call on thread 1 holds up every timer, sleep and
+    IO wait in the process until it returns, a `Timer` meant to cancel it
+    included: cancel such a call from another thread.
   - **The directory sandbox:** the same; the call is stopped from outside
     (wasmtime's epoch), Lua included. A Ctrl-C or a cancel while
     `libpandoc.wasm` is still loading (a process's first sandboxed call)
@@ -240,8 +242,9 @@ pandocjl -F other-filter input.md              # anything else: as pandoc does
   happen twice): the conversion fails (`LibPandoc.ScriptFailed`), naming
   those two ways. A script's `using` finds packages on `pandocjl`'s load
   path, in process or not (as `julia script.jl` would on its own): this
-  package's environment (the app's), the default one (`@v#.#`), the
-  standard library; not a `Project.toml` beside the script. A script with
+  package's environment (the app's), the active project if any, the
+  default one (`@v#.#`), the standard library; not a `Project.toml`
+  beside the script. A script with
   packages of its own puts its project on the load path itself, after
   `pandocjl`'s (whose packages then win), in its first line:
   `@__DIR__() in LOAD_PATH || push!(LOAD_PATH, @__DIR__)` (its directory's

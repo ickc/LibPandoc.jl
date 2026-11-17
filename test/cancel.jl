@@ -8,10 +8,10 @@
 # that a cancel that doesn't work fails the test rather than hanging it).
 #
 # The token's tests don't depend on Ctrl-C's arrangement (a call made on
-# thread 1 run in the default pool): the cancelling task sleeps in its own
-# thread (Libc.systemsleep), not by libuv's timers, which a call holding
-# thread 1 would hold up; it needs a thread other than the call's (the
-# tests run with --threads=2).
+# thread 1 run in the default pool): the cancelling task naps on its own
+# thread (`nap`), not on libuv's timers, which a call holding thread 1
+# would hold up; it needs a thread other than the call's (the tests run
+# with --threads=2).
 
 const SLOW = ">"^100_000
 const LIMIT = 60
@@ -28,7 +28,10 @@ function timed(f)
     e, time() - t
 end
 
-cancel_after(t, s) = Threads.@spawn (Libc.systemsleep(s); cancel!(t))
+# `s` seconds on this thread, without libuv's timers; a GC waits for it
+# 10 ms at most (Libc.systemsleep doesn't let one run meanwhile)
+nap(s) = (t = time() + s; while time() < t; Libc.systemsleep(0.01); GC.safepoint(); end)
+cancel_after(t, s) = Threads.@spawn (nap(s); cancel!(t))
 
 @testset "cancel" begin
     t = CancelToken()
@@ -72,7 +75,7 @@ cancel_after(t, s) = Threads.@spawn (Libc.systemsleep(s); cancel!(t))
     t = CancelToken()
     # (cancelled from this task: the calls may fill the default pool)
     calls = [Threads.@spawn timed(() -> P.convert(SLOW; timeout = LIMIT, cancel = t))[1] for _ in 1:3]
-    Libc.systemsleep(1)
+    nap(1)
     cancel!(t)
     @test all(iscancelled ∘ fetch, calls)
 
@@ -80,7 +83,7 @@ cancel_after(t, s) = Threads.@spawn (Libc.systemsleep(s); cancel!(t))
     # call then fails. A filter may cancel its own call's token.
     t = CancelToken()
     ran = Threads.Atomic{Bool}(false)
-    slow_filter(d::Panir.Pandoc) = (Libc.systemsleep(1); ran[] = true; nothing)
+    slow_filter(d::Panir.Pandoc) = (nap(1); ran[] = true; nothing)
     c = cancel_after(t, 0.2)
     e, took = timed(() -> P.convert("x"; to = "html", filters = [slow_filter], cancel = t))
     wait(c)

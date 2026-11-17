@@ -170,7 +170,15 @@ Read so, a text keeps its tabs, as Lua's `pandoc.read` reads it; the
 `pandoc` command first replaces them by spaces (`preserve_tabs = false`
 does). A call each costs about 0.3 ms, six times `pandoc.read`'s: batch
 them. amsthm's 738 notes take 0.23 s read one by one and 0.012 s in one
-`read_many`.
+`read_many`; a table's 10,011 small markdown texts (pantable's) 0.58 s
+with a `read` each and 0.18 s in one `read_many`.
+
+A text `read_many` can't read fails the call with its `PandocError`,
+whose message names it `reading input N`, N its place in the vector
+counted from 1 (Python's and Rust's count from 0). The number is in the
+message only. To map failures back to what the texts came from (a
+table's cells), pass `return_exceptions = true`: each failure is then in
+its text's place in the result, the other documents kept.
 
 **Confined when the conversion is.** Document text read this way may name
 files (LaTeX's `\input`, RST's and Org's includes). When the conversion
@@ -230,9 +238,19 @@ pandocjl -F other-filter input.md              # anything else: as pandoc does
   `.jl`, or `*`). A script that fails to load in process, or hands no
   filter over, is not run again as a subprocess (its side effects would
   happen twice): the conversion fails (`LibPandoc.ScriptFailed`), naming
-  those two ways. A script's globals persist between the documents of one
-  process (it is loaded once: `pandocjl` converts one document,
-  `LibPandoc.convert` may convert many), as do its changes to `ENV`, the
+  those two ways. A script's `using` finds packages on `pandocjl`'s load
+  path, in process or not (as `julia script.jl` would on its own): this
+  package's environment (the app's), the default one (`@v#.#`), the
+  standard library; not a `Project.toml` beside the script. A script with
+  packages of its own puts its project on the load path itself, after
+  `pandocjl`'s (whose packages then win), in its first line:
+  `@__DIR__() in LOAD_PATH || push!(LOAD_PATH, @__DIR__)` (its directory's
+  `Project.toml`, with a `Manifest.toml` instantiated); or, running
+  `julia -m LibPandoc` rather than the app (whose launcher sets
+  `JULIA_LOAD_PATH` itself), `JULIA_LOAD_PATH=@:/path/to/project:@stdlib`.
+  A script's globals persist between the documents of one process (it is
+  loaded once: `pandocjl` converts one document, `LibPandoc.convert` may
+  convert many), as do its changes to `ENV`, the
   packages it loads and the tasks it starts: it runs with all your rights,
   as any filter but a wasm one. Reset what it counts for each document
   where the walk meets `Pandoc` first (`run_filter(f; traverse =

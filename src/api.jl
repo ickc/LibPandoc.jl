@@ -230,10 +230,12 @@ call's: it returns within about that long, a text not read by then failing
 with a `PandocError` of kind `"Timeout"`. The readers' warnings (an include
 file not found) are logged, as `convert`'s.
 
-A text that can't be read throws its `PandocError` (the first one's); with
-`return_exceptions = true` each such error is in the result in its text's
-place instead, the others' documents kept. `cancel = token` and Ctrl-C stop
-it as a whole, as `convert`.
+A text that can't be read throws its `PandocError` (the first one's),
+whose message names it `reading input N`, N its place counted from 1 (in
+the message only); with `return_exceptions = true` each such error is in
+the result in its text's place instead, the others' documents kept: how a
+caller maps a failure back to where the text came from. `cancel = token`
+and Ctrl-C stop it as a whole, as `convert`.
 
 ```julia
 cells(b::CodeBlock, ctx) =

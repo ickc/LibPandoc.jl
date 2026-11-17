@@ -25,14 +25,9 @@ function Panir.run_filter(r::RawFilter; traverse::Symbol = :typewise)
     nothing
 end
 
-# The conversion libpandoc describes to a filter in this process.
-function _conversion(context, @nospecialize(options))
-    nonempty(k) = (v = get(context, k, nothing); v === nothing || isempty(v) ? nothing : String(v))
-    Conversion(; format = nonempty("format"), input_format = nonempty("input-format"),
-               output_format = nonempty("output-format"),
-               reader_options = get(context, "reader-options", nothing),
-               writer_options = get(context, "writer-options", nothing), options)
-end
+# The conversion libpandoc describes to a filter in this process (its
+# context), and the conversion's options when known.
+_conversion(context, @nospecialize(options)) = Conversion(context; options)
 
 _user_options(@nospecialize(opts)) = opts === nothing ? nothing :
     Dict{String, Any}(k => v for (k, v) in opts if k != "filters")

@@ -22,7 +22,11 @@
 # The options and arguments go to pandoc untouched. Lua filters run inside;
 # JSON filters (programs) fail, as a PDF engine does; Julia filters and wasm
 # filters run in this process, called back by the module (its import
-# `libpandoc.filter`), a wasm filter seeing the same directories.
+# `libpandoc.filter`), a wasm filter seeing the same directories. They are
+# told that the conversion is sandboxed (the context's "sandbox",
+# PANDOC_SANDBOX: true, where the module tells of pandoc's own sandbox only),
+# so that what they read through pandoc is read in its sandbox. A cancel
+# token stops the module from outside, as the time limit does.
 #
 # Threads: the module runs on the calling task, and the filters it calls
 # back run there too, inside wasmtime's call. wasmtime keeps per-thread
@@ -250,19 +254,26 @@ function _sandbox_module()
 end
 
 const _WASM_URL = "https://github.com/ickc/libpandoc/releases/download/$RELEASE/libpandoc.wasm"
+# its licence notices, downloaded beside it
+const _NOTICES = "libpandoc-wasm-THIRD-PARTY-NOTICES.txt"
 
-# libpandoc.wasm of the release, checked against its SHA256SUMS, written
-# beside `path` and then moved there (never half there).
+# libpandoc.wasm of the release, and its notices beside it, each checked
+# against the release's SHA256SUMS, written beside where it goes and then
+# moved there (never half there); the module last.
 function _download_wasm(path; url = _WASM_URL)
     @warn "Downloading libpandoc.wasm (libpandoc $RELEASE, about 60 MB) into $path, once; " *
           "its first compilation takes about 20 s and 8 GB of memory"
     try
-        file = _fetch(url)
-        _check_sum(url, file)
         mkpath(dirname(path))
-        part = "$path.$(getpid()).part"
-        cp(file, part; force = true)
-        mv(part, path; force = true)
+        dir, _ = _split_url(url)
+        notices = isfile(url) ? joinpath(dir, _NOTICES) : "$dir/$_NOTICES"
+        for (from, to) in ((notices, joinpath(dirname(path), _NOTICES)), (url, path))
+            file = _fetch(from)
+            _check_sum(from, file)
+            part = "$to.$(getpid()).part"
+            cp(file, part; force = true)
+            mv(part, to; force = true)
+        end
     catch e
         throw(_refused("downloading libpandoc.wasm: $(_message(e)) (or set $WASM_VAR)", "PandocAppError"))
     end
@@ -376,7 +387,12 @@ function _import_filter(env::Ptr{Cvoid}, caller::Ptr{Cvoid}, args::Ptr{UInt64}, 
             cb = run.cbs[i + 1]
             try
                 d, c = _guest_bytes(caller, doc, dl), _guest_bytes(caller, ctx, cl)
-                result = Base.invokelatest(cb.run, String(d), JSON.parse(String(c)))
+                # told that the conversion is sandboxed: the module tells only
+                # of pandoc's own sandbox, and a filter here runs outside it,
+                # so that what it reads through pandoc is read in its sandbox
+                context = Dict{String, Any}(JSON.parse(String(c)))
+                context["sandbox"] = true
+                result = Base.invokelatest(cb.run, String(d), context)
                 status, answer = Int32(0), result isa AbstractString ? codeunits(String(result)) : result::AbstractVector{UInt8}
             catch e
                 cb.error === nothing && (cb.error = (e, catch_backtrace()))
@@ -407,9 +423,10 @@ Run `call` in a fresh instance of the module seeing the mounts:
 index in its "filters"), `(:args, argv)` (pandoc_convert_args) or `(:main,
 argv, filters_json)` (pandoc_main): (status, output, kind, message, log),
 `output` etc. empty for :main. A callback's exception is thrown after it
-returns, as natively; a limit met, a PandocError.
+returns, as natively; a limit met, or `token` (a CancelToken) cancelled, a
+PandocError.
 """
-function _sandbox_run(m::_Mounts, dirs::_Dirs, call, input, cbs::Vector{_Callback})
+function _sandbox_run(m::_Mounts, dirs::_Dirs, call, input, cbs::Vector{_Callback}, token = nothing)
     timeout, max_memory = _sandbox_limits(dirs)
     mod, linker = _sandbox_module()
     w = _wasmtime()
@@ -435,12 +452,18 @@ function _sandbox_run(m::_Mounts, dirs::_Dirs, call, input, cbs::Vector{_Callbac
     run = _SandboxRun(cbs)
     store = @ccall libwasmtime.wasmtime_store_new(w.engine::Ptr{Cvoid}, pointer_from_objref(run)::Ptr{Cvoid}, C_NULL::Ptr{Cvoid})::Ptr{Cvoid}
     started = _now()
+    watch = token === nothing ? nothing : _Watch(token, timeout === nothing ? nothing : started + timeout, nothing)
     function body()
         ctx = @ccall libwasmtime.wasmtime_store_context(store::Ptr{Cvoid})::Ptr{Cvoid}
         @ccall libwasmtime.wasmtime_store_limiter(store::Ptr{Cvoid}, something(max_memory, -1)::Int64,
                                                   (-1)::Int64, (-1)::Int64, (-1)::Int64, (-1)::Int64)::Cvoid
         @ccall libwasmtime.wasmtime_context_set_epoch_deadline(ctx::Ptr{Cvoid}, UInt64(ticks)::UInt64)::Cvoid
+        watch === nothing || _watch!(store, ctx, watch)
         _stop_on(@ccall libwasmtime.wasmtime_context_set_wasi(ctx::Ptr{Cvoid}, wasi::Ptr{Cvoid})::Ptr{Cvoid})
+        # (a cancel before the store was watched, while the module loaded,
+        # moved the epoch when nothing looked at it; checked once the store
+        # owns the WASI configuration, whose directories it then closes)
+        watch === nothing || !iscancelled(watch.token) || throw(PandocError("Cancelled", _CANCELLED))
         inst = Ref{NTuple{2, UInt64}}()
         trap = Ref{Ptr{Cvoid}}(C_NULL)
         err = @ccall gc_safe = true libwasmtime.wasmtime_linker_instantiate(linker::Ptr{Cvoid}, ctx::Ptr{Cvoid},
@@ -451,11 +474,14 @@ function _sandbox_run(m::_Mounts, dirs::_Dirs, call, input, cbs::Vector{_Callbac
     end
     # (the store's data alive meanwhile; the task on this thread, and alone
     # in wasm on it with callbacks: above, "Threads")
-    pinned() = GC.@preserve run _blocking(() -> _pinned(body))
+    pinned() = GC.@preserve run watch _blocking(() -> _pinned(body))
     result = try
         timeout === nothing ? pinned() : _with_clock(pinned, w)
     catch e
         e isa _Stopped || rethrow()
+        reason = watch === nothing ? nothing : @atomic watch.reason
+        reason === :cancelled && throw(PandocError("Cancelled", _CANCELLED))
+        reason === :timeout && (e = _Stopped(e.message, true, nothing))
         throw(_stopped(e, dirs, timeout, max_memory, started))
     finally
         @ccall libwasmtime.wasmtime_store_delete(store::Ptr{Cvoid})::Cvoid
@@ -516,39 +542,6 @@ function _call_in(ctx, inst, call, input, m, n)
         isempty(kind) ? "Exception" : kind, text(w[5]), isempty(log) ? "[]" : log
 end
 
-# Julia's libuv puts the standard streams that are pipes in non-blocking
-# mode (uv_pipe_open does), which GHC's runtime handles natively and WASI's
-# inherited streams do not: pandoc failed with "hardware fault" (EAGAIN) as
-# soon as a pipe was empty or full. So they are blocking while the module
-# runs, as for any other program, and as they were once no module runs.
-# (Windows: no such mode.)
-const _O_NONBLOCK = Sys.isapple() || Sys.isbsd() ? Cint(0x0004) : Cint(0x0800)
-const _STD_LOCK = ReentrantLock()
-const _STD_FLAGS = Cint[]   # the streams' flags before, while runs go on
-
-function _blocking(f)
-    Sys.iswindows() && return f()
-    lock(_STD_LOCK) do
-        isempty(_STD_FLAGS) || return push!(_STD_FLAGS, -1)   # (one more run)
-        for fd in 0:2
-            flags = @ccall fcntl(fd::Cint, 3::Cint)::Cint   # F_GETFL
-            flags >= 0 && @ccall fcntl(fd::Cint, 4::Cint; (flags & ~_O_NONBLOCK)::Cint)::Cint   # F_SETFL
-            push!(_STD_FLAGS, flags)
-        end
-    end
-    try
-        f()
-    finally
-        lock(_STD_LOCK) do
-            length(_STD_FLAGS) > 3 && return pop!(_STD_FLAGS)
-            for (fd, flags) in zip(0:2, _STD_FLAGS)
-                flags >= 0 && @ccall fcntl(fd::Cint, 4::Cint; flags::Cint)::Cint
-            end
-            empty!(_STD_FLAGS)
-        end
-    end
-end
-
 # -- the entry points -----------------------------------------------------------------
 
 # A conversion's output, after reporting its log; a PandocError if it failed,
@@ -561,14 +554,15 @@ function _sandbox_take((status, out, kind, msg, log), m::_Mounts)
 end
 
 # `convert` in the sandbox: the options as they are but for "sandbox", the
-# filters of this process called back.
-function _sandboxed_convert(opts, input, dirs::_Dirs)
+# filters of this process called back; stopped from outside when `token` is
+# cancelled.
+function _sandboxed_convert(opts, input, dirs::_Dirs, token = nothing)
     m = _Mounts(dirs)
     try
         cbs, entries = _plan(get(opts, "filters", ()), opts; mounts = m)
         o = Dict{String, Any}(k => v for (k, v) in opts if k != "sandbox")
         isempty(cbs) || (o["filters"] = entries)
-        _sandbox_take(_sandbox_run(m, dirs, (:options, _json(o)), _bytes(input), cbs), m)
+        _sandbox_take(_sandbox_run(m, dirs, (:options, _json(o)), _bytes(input), cbs, token), m)
     finally
         _close(m)
     end

@@ -5,7 +5,8 @@
 
 A pandoc failure. `kind` is pandoc's error constructor, e.g.
 `"PandocParseError"` or `"PandocUnknownReaderError"`, `"Timeout"` for a
-call stopped by its time limit ([`istimeout`](@ref)), or `"Exception"`;
+call stopped by its time limit ([`istimeout`](@ref)), `"Cancelled"` for one
+stopped by its [`CancelToken`](@ref) ([`iscancelled`](@ref)), or `"Exception"`;
 `message` is what the pandoc command would print.
 
 ```julia
@@ -109,13 +110,15 @@ _bytes(x::AbstractVector{UInt8}) = x
 # yields, no other task on this thread may start such a call: that one's
 # callbacks could yield too, and the two calls would then return to pandoc
 # out of order. Calls without callbacks never yield, so need neither.
+#
+# The task is made sticky meanwhile (`Task.sticky`, what `@async` sets):
+# Julia's scheduler puts a sticky task that yielded back on the thread it
+# ran on. Julia has no documented call for this; the "threads" test (tasks
+# of `Threads.@spawn` whose filter yields) crashes without it.
 function _pinned(f)
     t = current_task()
     sticky = t.sticky
-    if !sticky
-        t.sticky = true
-        ccall(:jl_set_task_tid, Cint, (Any, Cint), t, Threads.threadid() - 1)
-    end
+    t.sticky = true
     tid = Threads.threadid()
     l = tid <= length(_THREAD_LOCKS) ? _THREAD_LOCKS[tid] : nothing
     try
@@ -213,10 +216,59 @@ function _with_callbacks(f, cbs::Vector{_Callback})
 end
 
 # What a filter threw, as the call throws it: a FilterError, but a time
-# limit's PandocError as it is (a script stopped as pandoc stops a JSON filter).
-_filter_error(e, bt) = istimeout(e) ? e : FilterError(e, bt)
+# limit's PandocError as it is (a script stopped as pandoc stops a JSON
+# filter), and a cancel's (a call the filter made, stopped with its conversion).
+_filter_error(e, bt) = istimeout(e) || iscancelled(e) ? e : FilterError(e, bt)
 
 # -- the calls -------------------------------------------------------------------------
+
+# Julia's libuv puts the standard streams that are pipes in non-blocking
+# mode (it duplicates fd 1 and 2 and sets FIONBIO on the copies, which share
+# the flag with the originals). Code that writes to them as C does gives up
+# at the first EAGAIN, when the pipe is full (64 KiB on Linux): a Lua
+# filter's `io.stdout:write` returned nil and "Resource temporarily
+# unavailable", the rest lost; a JSON filter inheriting standard error
+# failed likewise (Python: BlockingIOError); WASI's inherited streams in the
+# directory sandbox failed with "hardware fault". (GHC's runtime, pandoc's
+# own output, waits.) So they are blocking while pandocjl's pandoc runs (the
+# process is pandoc's command then) and while the sandbox's module does
+# (which fails otherwise), as for any other program, and as they were once
+# none runs. Julia's own writes to them meanwhile block too (the copies
+# share the flag) rather than being queued.
+#
+# Not around a library call outside the sandbox: the streams are the
+# program's, and one that reads its own standard output (`redirect_stdout()`,
+# as test and documentation tools do) in a task of the thread the call holds
+# would wait forever on a write the pipe can't hold (seen: 200,000 bytes
+# from a Lua filter, and from one `print` of a Julia filter, which Julia
+# writes whole when left alone; Lua's is cut either way). (Windows: no such
+# mode.)
+const _O_NONBLOCK = Sys.isapple() || Sys.isbsd() ? Cint(0x0004) : Cint(0x0800)
+const _STD_LOCK = ReentrantLock()
+const _STD_FLAGS = Cint[]   # the streams' flags before, while calls go on
+
+function _blocking(f)
+    Sys.iswindows() && return f()
+    lock(_STD_LOCK) do
+        isempty(_STD_FLAGS) || return push!(_STD_FLAGS, -1)   # (one more call)
+        for fd in 0:2
+            flags = @ccall fcntl(fd::Cint, 3::Cint)::Cint   # F_GETFL
+            flags >= 0 && flags & _O_NONBLOCK != 0 && @ccall fcntl(fd::Cint, 4::Cint; (flags & ~_O_NONBLOCK)::Cint)::Cint   # F_SETFL
+            push!(_STD_FLAGS, flags)
+        end
+    end
+    try
+        f()
+    finally
+        lock(_STD_LOCK) do
+            length(_STD_FLAGS) > 3 && return pop!(_STD_FLAGS)
+            for (fd, flags) in zip(0:2, _STD_FLAGS)
+                flags >= 0 && flags & _O_NONBLOCK != 0 && @ccall fcntl(fd::Cint, 4::Cint; flags::Cint)::Cint
+            end
+            empty!(_STD_FLAGS)
+        end
+    end
+end
 
 function _convert(options::AbstractString, input, cbs::Vector{_Callback} = _Callback[]; take = _take)
     s = _load()
@@ -271,8 +323,8 @@ function _pandoc_main(argv::Vector{String}, filters_json::Union{Nothing, String}
     _with_callbacks(cbs) do fs
         GC.@preserve argv ptrs filters_json fs begin
             fsptr = isempty(fs) ? C_NULL : pointer(fs)
-            @ccall gc_safe = true $(s.main)(length(argv)::Cint, ptrs::Ptr{Ptr{UInt8}},
-                fj::Ptr{UInt8}, fjlen::Csize_t, fsptr::Ptr{_Filter}, length(fs)::Csize_t)::Cint
+            _blocking(() -> @ccall gc_safe = true $(s.main)(length(argv)::Cint, ptrs::Ptr{Ptr{UInt8}},
+                fj::Ptr{UInt8}, fjlen::Csize_t, fsptr::Ptr{_Filter}, length(fs)::Csize_t)::Cint)
         end
     end
 end

@@ -1,15 +1,19 @@
 # What a filter reads through pandoc with its conversion (`read(text,
 # ctx.conversion)`, `read_many`) is read in pandoc's own sandbox when the
 # conversion is sandboxed, however the sandbox was asked for and however the
-# filter was given; and when that can't be told (pandocjl's conversion, one a
-# script run as a subprocess makes from its environment, one made by hand).
+# filter was given; and when that can't be told (one made by hand, or from
+# the environment under plain pandoc). libpandoc (1.13) tells every filter
+# whether pandoc's sandbox is on (a callback's context, PANDOC_SANDBOX); the
+# directory sandbox, whose filters run in this process outside
+# libpandoc.wasm, tells them it is.
 #
 # The probe: a filter reading LaTeX, RST and Org fragments that include a
 # canary inside a directory (INSIDE-OK) and one outside it (CANARY), and
-# saying which it got ("latex:IO": both).
+# saying which it got ("latex:IO": both), and what it was told (`|true`:
+# its conversion's `sandbox`).
 
-const OPEN = "latex:IO rst:IO org:IO"
-const CONFINED = "latex:-- rst:-- org:--"
+const OPEN = "latex:IO rst:IO org:IO|false"
+const CONFINED = "latex:-- rst:-- org:--|true"
 
 # what a probe does, as a script's text (`seen` below is the same)
 function seen_source(root)
@@ -27,7 +31,7 @@ function seen_source(root)
                 Panir.serialize(LibPandoc.read(text, conversion; from = fmt))
             end
             string(fmt, ":", occursin("INSIDE-OK", s) ? "I" : "-", occursin("CANARY", s) ? "O" : "-")
-        end for (fmt, text) in FRAGMENTS], " ")
+        end for (fmt, text) in FRAGMENTS], " ") * "|" * repr(conversion.sandbox)
     end
     """
 end
@@ -110,12 +114,15 @@ const WAYS = ["function" => by_function, "RawFilter" => by_raw, "script handing 
     lab = confined_lab()
     for (way, f) in WAYS
         # unsandboxed, what a filter reads may include files, as Lua's
-        # pandoc.read; a script making its conversion from its environment
-        # can't tell, and is confined
-        @test f(lab, (;)) == (way == "script as a subprocess" ? CONFINED : OPEN)
+        # pandoc.read, and it is told so (a script making its conversion from
+        # its environment too: PANDOC_SANDBOX=false)
+        @test f(lab, (;)) == OPEN
+        @test f(lab, (sandbox = false,)) == OPEN
         @test f(lab, (sandbox = true,)) == CONFINED
-        # in process, outside the module: pandoc's own sandbox, no files,
-        # not even inside the directory listed
+        # in process, outside the module: told that the conversion is
+        # sandboxed (the module tells of pandoc's own sandbox only, which is
+        # off here), and so in pandoc's own sandbox, no files, not even
+        # inside the directory listed
         @test f(lab, (sandbox = (read = [lab.inside],),)) == CONFINED
     end
     # a filter that wants files read gives its own options: its code
@@ -130,22 +137,52 @@ const WAYS = ["function" => by_function, "RawFilter" => by_raw, "script handing 
     end
     P.convert("x"; to = "plain", filters = [unconfined], sandbox = true)
     @test contains(only(got), "CANARY")
-    # a conversion made by hand, without options: can't tell; with options
-    # without "sandbox": not sandboxed
-    @test P.read_options(Conversion())["sandbox"] === true
-    @test !haskey(P.read_options(Conversion(; options = Dict{String, Any}())), "sandbox")
-    @test P.read_options(Conversion(; options = Dict{String, Any}("sandbox" => Dict("read" => String[]))))["sandbox"] === true
-    @test lab.seen(Conversion(; options = Dict{String, Any}())) == OPEN
+    # the rule: sandboxed when told so, or the options ask for it, or nothing
+    # tells (no `sandbox`, no options: one made by hand, or from the
+    # environment under plain pandoc)
+    O(pairs...) = Dict{String, Any}(pairs...)
+    for (c, confined) in ((Conversion(), true), (Conversion(; sandbox = true), true),
+                          (Conversion(; sandbox = false), false), (Conversion(; options = O()), false),
+                          (Conversion(; options = O("sandbox" => true)), true),
+                          (Conversion(; options = O("sandbox" => Dict("read" => String[]))), true),
+                          (Conversion(; sandbox = false, options = O("sandbox" => true)), true),
+                          (Conversion(; sandbox = true, options = O()), true),
+                          (Conversion(; options = O("sandbox" => false)), false))
+        @test get(P.read_options(c), "sandbox", false) === confined
+    end
+    @test lab.seen(Conversion(; sandbox = false)) == OPEN
+    @test lab.seen(Conversion()) == replace(CONFINED, "true" => "nothing")
     @test_throws PandocError P.read_many(["x"]; sandbox = (read = String[],))
-    # pandocjl: pandoc doesn't tell its filters about --sandbox (in the
-    # arguments or a defaults file), so they are always confined; in the
-    # directory sandbox too
+    # pandocjl: its filters are told whether pandoc's sandbox is on, however
+    # it was set (--sandbox, a defaults file): confined then only; in the
+    # directory sandbox told it is, and confined (the security-critical
+    # case: pandoc in the module, whose own sandbox is off, the filter here)
+    Base.write(joinpath(lab.root, "d.yaml"), "sandbox: true\n")
     for kind in ("handoff", "subprocess")
-        for (args, env) in (((), Dict{String, String}()), (("--sandbox",), Dict{String, String}()),
-                            ((), Dict("LIBPANDOC_SANDBOX" => lab.inside)))
+        for (args, env, expected) in (((), Dict{String, String}(), OPEN), (("--sandbox",), Dict{String, String}(), CONFINED),
+                                      (("-d", joinpath(lab.root, "d.yaml")), Dict{String, String}(), CONFINED),
+                                      ((), Dict("LIBPANDOC_SANDBOX" => lab.inside), CONFINED),
+                                      (("--sandbox",), Dict("LIBPANDOC_SANDBOX" => lab.inside), CONFINED))
             status, out, err = pandocjl("-t", "plain", args..., "-F", lab.scripts[kind]; input = "x", env)
-            @test status == 0 && plain(out) == CONFINED
+            @test status == 0 && plain(out) == expected
             status == 0 || println(err)
         end
+    end
+    # a subprocess script gets libpandoc's variables from its conversion
+    # only, none of this process's
+    withenv("PANDOC_SANDBOX" => "true", "PANDOC_INPUT_FORMAT" => "stale") do
+        script = joinpath(lab.root, "env.jl")
+        Base.write(script, "read(stdin); print(join(sort([k for k in keys(ENV) if startswith(k, \"PANDOC_\")]), ' '))")
+        out = String(P._subprocess(script, "{}", Dict{String, Any}("format" => "html")))
+        @test out == "PANDOC_READER_OPTIONS PANDOC_VERSION"
+        out = String(P._subprocess(script, "{}", Dict{String, Any}("format" => "html", "sandbox" => false)))
+        @test out == "PANDOC_READER_OPTIONS PANDOC_SANDBOX PANDOC_VERSION"
+    end
+    # a wasm filter's PANDOC_SANDBOX
+    if !isempty(WASM)
+        told(; opts...) = JSON.parse(JSON.parse(P.convert("x"; to = "json", filters = [wasm("conversion")], opts...))["blocks"][end]["c"][2])["sandbox"]
+        @test told() == "false"
+        @test told(sandbox = true) == "true"
+        @test told(sandbox = (read = [lab.inside], timeout = 120)) == "true"
     end
 end

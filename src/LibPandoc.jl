@@ -22,7 +22,9 @@ Pandoc.convert("hi"; to = "html", filters = [upper])      # "<p>HI</p>\\n"
   [...])`: pandoc in libpandoc.wasm, seeing only those directories (the
   README's "Security"; `\$LIBPANDOC_SANDBOX` for `run` and pandocjl).
   Failures throw `PandocError` (of kind `"Timeout"` past the time limit:
-  `istimeout(e)`);
+  `istimeout(e)`; `"Cancelled"`, stopped by a `CancelToken` given as
+  `cancel`: `iscancelled(e)`; in the REPL Ctrl-C stops a call too:
+  `InterruptException`);
   pandoc's warnings are logged (`@warn`).
 - **Filters** (`filters = [...]`), in order, all in one pandoc run:
   - a Julia function with methods for the nodes to change, walked as
@@ -54,10 +56,11 @@ using CodecZlib: GzipDecompressorStream
 import Wasmtime_jll
 using PrecompileTools: @setup_workload, @compile_workload
 
-export PandocError, FilterError, RawFilter, WasmFilter, istimeout
+export PandocError, FilterError, RawFilter, WasmFilter, istimeout, CancelToken, cancel!, iscancelled
 
 include("library.jl")
 include("abi.jl")
+include("cancel.jl")
 include("api.jl")
 include("wasm.jl")
 include("filters.jl")
@@ -77,6 +80,7 @@ function __init__()
     _SANDBOX_LINKER[] = C_NULL
     _ENTRY[] = @cfunction(_callback_entry, Cint, (Ptr{Cvoid}, Ptr{UInt8}, Csize_t, Ptr{UInt8}, Csize_t, Ptr{Cvoid}))
     append!(empty!(_THREAD_LOCKS), [ReentrantLock() for _ in 1:Threads.maxthreadid()])
+    atexit(_on_exit)
 end
 
 include("precompile.jl")

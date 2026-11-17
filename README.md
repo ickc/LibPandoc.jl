@@ -42,7 +42,8 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
   relative path find nothing, and `$sourcefile$` names that file: give
   such documents as `input_files`.
 - **Errors** throw `PandocError`, with `kind` set to pandoc's error
-  constructor (`"PandocParseError"`, ...), or `"Timeout"`. pandoc's
+  constructor (`"PandocParseError"`, ...), or `"Timeout"`, or
+  `"Cancelled"`. pandoc's
   **warnings** are logged with `@warn`, `read_many`'s readers' too.
 - **Time limit:** `timeout = seconds` (libpandoc's option, for `convert`,
   `read`, `write`, `read_many`) stops a call still running after that
@@ -55,11 +56,95 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
   fails on its own (`return_exceptions = true` keeps the others'
   documents). No memory limit natively: for documents from someone you
   don't trust, the directory sandbox (below), which has both limits.
+- **Cancelling:** `cancel = token` (a `CancelToken()`) on the same
+  functions stops a call when `cancel!(token)` is called, from another
+  task or thread or from a filter: a `PandocError` of kind `"Cancelled"`
+  (`iscancelled(e)`, as libpandoc-rs's `is_cancelled()`; `iscancelled(token)`
+  too), the process going on. It stops what `timeout` stops (in the
+  directory sandbox, the whole conversion, Lua included). A token stays
+  cancelled, and serves any number of calls. `untrusted = true` options
+  take none (libpandoc's rule: a `PandocError`).
+
+  ```julia
+  token = CancelToken()
+  Timer(_ -> cancel!(token), 5)          # a cancel button, a deadline
+  LibPandoc.convert(text; to = "html", cancel = token)
+  ```
+
+  **Ctrl-C.** Thread 1 runs the main task (a script's, the REPL's) and
+  libuv's loop, which wakes every task's timers, sleeps and IO; Julia
+  throws Ctrl-C as an `InterruptException` into the task on thread 1, at
+  its next safepoint, which a call into pandoc reaches only when it
+  returns. So in the REPL, when thread 1 is Julia's interactive thread, a
+  call made there runs in the default pool (`Threads.@spawn`) while the
+  caller waits, waking every 50 ms (a task asleep in `wait` took Ctrl-C
+  only when something woke it); Ctrl-C reaches the caller, which cancels
+  the call (its token, or one of its own) and throws the
+  `InterruptException` once it has stopped. What you get, for `convert`,
+  `read`, `write` and `read_many` made on thread 1:
+
+  - **The REPL** (or `julia -i`), **Julia 1.12 or later with its default
+    threads** (one interactive thread, thread 1, and one default) **or
+    `--threads=N`** (N default and one interactive): the call stops within
+    a fraction of a second, an `InterruptException` (measured: the REPL's
+    prompt back 0.02 to 0.11 s after Ctrl-C; in `julia -i -e`, 0.31 to
+    0.36 s from the signal to the `catch`). The call's Julia filters run
+    in its task, on a thread of the default pool, which inherits the
+    caller's scoped values and logger (not its task-local storage); timers
+    and IO in other tasks go on meanwhile.
+  - **A script** (`julia script.jl`, `-e`, `-m`; not interactive): the
+    call runs on thread 1. Julia exits at once on Ctrl-C, its default for
+    a script (0.10 to 0.11 s, measured); after
+    `Base.exit_on_sigint(false)` Ctrl-C takes effect when the call returns.
+    (Not run elsewhere there: Julia's exit on Ctrl-C takes thread 1 over
+    wherever it is, and with thread 1 waiting in Julia's scheduler that
+    exit hung, once in a CI run.)
+  - **`--threads=1` or `--threads=N,0`** (no interactive thread: thread 1
+    is in the default pool, where the call could run on thread 1 itself):
+    the call runs where it is made; in the REPL, Ctrl-C takes effect when
+    it returns (the prompt came back when the call's time limit stopped
+    it).
+  - Wherever a call runs on thread 1, it holds up every timer, sleep and
+    IO wait in the process until it returns, a `Timer` meant to cancel it
+    included: cancel it from another thread, or make the call in a task of
+    the default pool (`fetch(Threads.@spawn LibPandoc.convert(...))`).
+  - **The directory sandbox:** the same; the call is stopped from outside
+    (wasmtime's epoch), Lua included. A Ctrl-C or a cancel while
+    `libpandoc.wasm` is still loading (a process's first sandboxed call)
+    takes effect once it has loaded, before pandoc starts: measured, 0.9 s
+    after the call began from wasmtime's cache, 22 s at its first
+    compilation (minutes on a CI runner).
+  - **Windows:** the same; Ctrl-C itself is not checked there (the tests
+    can't send it), the token is.
+  - **Ctrl-C waits for the call to return** with `untrusted = true` (such
+    calls take no token), with `run`, and for a call made in a task on
+    another thread (`fetch(Threads.@spawn ...)`: Ctrl-C interrupts the
+    waiting, and the call goes on). `pandocjl` exits at once.
+
+  Running a call elsewhere costs about 18 µs (a tiny conversion: 0.344 ms
+  against 0.326 ms).
 - **Threads:** conversions from different tasks and threads run in
   parallel, on pandoc's own threads: one per logical core, or
   `$LIBPANDOC_NUM_THREADS`; `num_threads()`. `set_num_threads(n)` sets the
   number only before pandoc first runs something in parallel (it grows to
   it then, once), and returns the number in effect.
+- **Standard streams:** Julia's libuv puts a pipe on standard input,
+  output or error in non-blocking mode, in which whatever writes to it as C
+  does stops at a full pipe (64 KiB on Linux, `EAGAIN`): a Lua filter's
+  `io.stdout:write` returns `nil` and the error, the rest not written, and
+  a JSON filter writing to the standard error it inherits fails likewise
+  (Python's `BlockingIOError`). `pandocjl` puts them in blocking mode while
+  pandoc runs, as for any other program, and the directory sandbox while
+  its module runs (WASI's streams fail otherwise), and back as they were
+  after; Julia's own writes to them meanwhile (a Julia filter's `println`)
+  wait for the reader rather than being queued. A library call outside the
+  sandbox leaves them as Julia has them (they are the program's): so a Lua
+  filter of such a call that writes much to a pipe checks what
+  `io.stdout:write` returns, or writes to a file. Blocking, a program that
+  reads its own standard output (`redirect_stdout()`, as test and
+  documentation tools do) in a task of the thread the call holds would
+  wait forever on a write the pipe can't hold, as it does in the directory
+  sandbox. (Not on Windows, which has no such mode.)
 - **Untrusted options:** `untrusted = true` accepts only options that read
   no files, write none, fetch nothing and run nothing, with pandoc's
   sandbox on (libpandoc's list; anything else throws a `PandocError`
@@ -103,20 +188,32 @@ Read so, a text keeps its tabs, as Lua's `pandoc.read` reads it; the
 `pandoc` command first replaces them by spaces (`preserve_tabs = false`
 does). A call each costs about 0.3 ms, six times `pandoc.read`'s: batch
 them. amsthm's 738 notes take 0.23 s read one by one and 0.012 s in one
-`read_many`.
+`read_many`; a table's 10,011 small markdown texts (pantable's) 0.58 s
+with a `read` each and 0.18 s in one `read_many`.
+
+A text `read_many` can't read fails the call with its `PandocError`,
+whose message names it `reading input N`, N its place in the vector
+counted from 1 (Python's and Rust's count from 0). The number is in the
+message only. To map failures back to what the texts came from (a
+table's cells), pass `return_exceptions = true`: each failure is then in
+its text's place in the result, the other documents kept.
 
 **Confined when the conversion is.** Document text read this way may name
 files (LaTeX's `\input`, RST's and Org's includes). When the conversion
-the filter runs in is sandboxed, by pandoc's sandbox (`sandbox = true`) or
-a directory sandbox (`sandbox = (read = [...],)`, `LIBPANDOC_SANDBOX`), the
-fragments are read in pandoc's own sandbox: they read no files, not even in
-the directories listed (the filter runs in this process, outside them). So
-they are too when that can't be told: for a conversion with no options, as
-`pandocjl`'s filters get (pandoc doesn't tell them about `--sandbox`, on
-the command line or in a defaults file) and a script run as a subprocess
-makes from its environment (`Conversion(ARGS, ENV)`). A filter that wants
-the files read gives its own options, `read(text, ctx.conversion; sandbox
-= false)`: its code, its choice.
+the filter runs in is sandboxed, by pandoc's sandbox (`sandbox = true`,
+`--sandbox`, a defaults file, `untrusted = true`) or a directory sandbox
+(`sandbox = (read = [...],)`, `LIBPANDOC_SANDBOX`), the fragments are read
+in pandoc's own sandbox: they read no files, not even in the directories
+listed (the filter runs in this process, outside them). libpandoc tells
+every filter whether pandoc's sandbox is on (`ctx.conversion.sandbox`,
+from a callback's context; `PANDOC_SANDBOX` for scripts run as a
+subprocess and wasm filters, which `Conversion(ARGS, ENV)` reads), and the
+directory sandbox tells its filters it is. The rule: a read is confined
+when the conversion's `sandbox` is `true`, or its options ask for a
+sandbox, or when nothing can tell (`sandbox` is `nothing` and there are no
+options: a conversion made by hand, or a script's under plain pandoc). A
+filter that wants the files read gives its own options, `read(text,
+ctx.conversion; sandbox = false)`: its code, its choice.
 
 It calls pandoc from its own task. A filter that waits for a conversion
 with Julia filters started in another task (`@async`, `Threads.@spawn`
@@ -159,9 +256,20 @@ pandocjl -F other-filter input.md              # anything else: as pandoc does
   `.jl`, or `*`). A script that fails to load in process, or hands no
   filter over, is not run again as a subprocess (its side effects would
   happen twice): the conversion fails (`LibPandoc.ScriptFailed`), naming
-  those two ways. A script's globals persist between the documents of one
-  process (it is loaded once: `pandocjl` converts one document,
-  `LibPandoc.convert` may convert many), as do its changes to `ENV`, the
+  those two ways. A script's `using` finds packages on `pandocjl`'s load
+  path, in process or not (as `julia script.jl` would on its own): this
+  package's environment (the app's), the active project if any, the
+  default one (`@v#.#`), the standard library; not a `Project.toml`
+  beside the script. A script with
+  packages of its own puts its project on the load path itself, after
+  `pandocjl`'s (whose packages then win), in its first line:
+  `@__DIR__() in LOAD_PATH || push!(LOAD_PATH, @__DIR__)` (its directory's
+  `Project.toml`, with a `Manifest.toml` instantiated); or, running
+  `julia -m LibPandoc` rather than the app (whose launcher sets
+  `JULIA_LOAD_PATH` itself), `JULIA_LOAD_PATH=@:/path/to/project:@stdlib`.
+  A script's globals persist between the documents of one process (it is
+  loaded once: `pandocjl` converts one document, `LibPandoc.convert` may
+  convert many), as do its changes to `ENV`, the
   packages it loads and the tasks it starts: it runs with all your rights,
   as any filter but a wasm one. Reset what it counts for each document
   where the walk meets `Pandoc` first (`run_filter(f; traverse =
@@ -287,14 +395,19 @@ called back by the module, unconfined. Wasm filters run in this process
 too, seeing the same mounts. `pandocjl lua` and `pandoc server` are not in
 the module (status 4). A filter that reads fragments with
 `read(text, ctx.conversion)` or `read_many` reads them in pandoc's own
-sandbox: no files, not even in the directories listed ("Filters").
+sandbox: no files, not even in the directories listed ("Filters"): every
+filter running in this process is told the conversion is sandboxed
+(`ctx.conversion.sandbox`, and `PANDOC_SANDBOX=true` for scripts and wasm
+filters), where the module tells of pandoc's own sandbox only.
 `read_many` reads in this process: a directory sandbox there is an error.
 
 **Limits.** `$LIBPANDOC_WASM_TIMEOUT` (seconds) and
 `$LIBPANDOC_WASM_MAX_MEMORY` (bytes, or with `k`, `m`, `g`), or for one
 call the sandbox's `timeout` and `max_memory` (bytes, an integer;
 `"max-memory"` in a `Dict`), stop a conversion past them, counted from the
-module's start; none by default (or 0), wasm's 4 GiB at most. A negative,
+module's start (as `cancel` and Ctrl-C stop it: from outside, wasmtime's
+epoch, which also brings other wasm runs' time limits one tick, 10 ms,
+nearer); none by default (or 0), wasm's 4 GiB at most. A negative,
 infinite or NaN one is an `ArgumentError`. A conversion stopped by the
 time limit throws a `PandocError` of kind `"Timeout"`, as one past
 libpandoc's `timeout` (which works inside too, but doesn't stop Lua); one
@@ -368,7 +481,7 @@ exists, a container at least, a virtual machine better.
 
 ## Installing
 
-LibPandoc.jl needs Julia 1.12 or later, and libpandoc 1.11 or a later
+LibPandoc.jl needs Julia 1.12 or later, and libpandoc 1.13 or a later
 1.x (its ABI version, checked when the library is loaded). It finds libpandoc:
 `$LIBPANDOC_PATH` (the library), else `$LIBPANDOC_PREFIX` or
 `$CONDA_PREFIX` (a prefix with `lib/libpandoc.so`, `.dylib`, or
@@ -388,4 +501,11 @@ Status: a prototype.
 
 ## License
 
-GPL-2.0-or-later, as pandoc: the package links pandoc.
+The package's own code is GPL-2.0-or-later (`COPYING.md`), as pandoc's: it
+links pandoc. What it loads is libpandoc, under the GPL, version 2, as a
+whole (pandoc and about 200 Haskell packages, GHC's runtime and a few C
+libraries, each under its own licence). The package carries none of it:
+the library is installed (`LIBPANDOC_PREFIX`, conda) or downloaded, its
+release archive unpacked whole, `COPYING.md` and `THIRD-PARTY-NOTICES`
+beside `lib/`; libpandoc.wasm, for the directory sandbox, is downloaded
+with `libpandoc-wasm-THIRD-PARTY-NOTICES.txt` beside it.

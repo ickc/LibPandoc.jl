@@ -38,11 +38,20 @@ FLOOD(fd) = """
 
 const PROJECT = dirname(Base.active_project())
 
-# pandocjl ARGS as a separate process: (status, stdout, stderr)
+# pandocjl ARGS as a separate process: (status, stdout, stderr). One still
+# running after 5 minutes is killed (a status of its own, and what it wrote):
+# a child that hangs fails its test rather than the job's time limit (seen
+# once on Windows, in the directory sandbox, cause not found).
 function pandocjl(args...; input = "", env = Dict{String, String}(), dir = pwd())
     cmd = `$(Base.julia_cmd()) --startup-file=no --project=$PROJECT -m LibPandoc $args`
     out, err = IOBuffer(), IOBuffer()
-    p = cd(() -> Base.run(pipeline(ignorestatus(addenv(cmd, env)); stdin = IOBuffer(input), stdout = out, stderr = err)), dir)
+    p = cd(() -> Base.run(pipeline(ignorestatus(addenv(cmd, env)); stdin = IOBuffer(input), stdout = out, stderr = err);
+                          wait = false), dir)
+    if timedwait(() -> process_exited(p), 300) === :timed_out
+        @error "pandocjl $(join(args, ' ')) still running after 300 s: killed"
+        kill(p)
+    end
+    wait(p)
     # pandoc writes native line endings (CRLF on Windows) to files and stdout
     p.exitcode, replace(String(take!(out)), "\r\n" => "\n"), String(take!(err))
 end
@@ -308,6 +317,12 @@ end
 @testset "threads" begin
     outs = fetch.([Threads.@spawn P.convert("t$i *x*"; to = "plain", filters = [upper]) for i in 1:40])
     @test outs == ["T$i X\n" for i in 1:40]
+    # a filter that yields inside pandoc's call (sleep, yield), from tasks
+    # free to move between threads: each returns into pandoc on the thread
+    # that called it (`_pinned`, which uses what Julia's scheduler does)
+    waits(s::Str) = (sleep(0.001); yield(); Str(uppercase(s.text)))
+    outs = fetch.([Threads.@spawn P.convert("t$i *x*"; to = "plain", filters = [waits]) for i in 1:40])
+    @test outs == ["T$i X\n" for i in 1:40]
     # the number in effect: set (before pandoc's threads have grown) or not
     @test P.set_num_threads(1) == P.num_threads() >= 1
 end
@@ -315,7 +330,7 @@ end
 @testset "versions" begin
     # the same major, a minor at least the one relied on
     v = 1000P.ABI_MAJOR + P.ABI_MINOR
-    @test P.ABI_MINOR >= 11 && P._abi_ok(v) && P._abi_ok(v + 1)
+    @test P.ABI_MINOR >= 13 && P._abi_ok(v) && P._abi_ok(v + 1)
     @test !P._abi_ok(v - 1) && !P._abi_ok(v + 1000)
     e = try P._abi_check(1007, "old/libpandoc.so") catch e; e end
     @test e isa ErrorException && contains(e.msg, "ABI 1.7") && contains(e.msg, "needs 1.$(P.ABI_MINOR)")
@@ -678,6 +693,62 @@ end
     end
 end
 
+@testset "pandocjl: a Lua filter's output through a pipe" begin
+    # Julia's libuv puts a pipe on standard output or error in non-blocking
+    # mode; a Lua filter's io.stdout:write stopped at a full pipe (64 KiB,
+    # EAGAIN), the rest lost. The reader here waits until the filter is about
+    # to write, then a second, so that the pipe is full when it does.
+    mktempdir() do d
+        mark = joinpath(d, "writing")
+        lua = joinpath(d, "big.lua")
+        Base.write(lua, """
+            function Pandoc(doc)
+              io.open($(repr(mark)), "w"):close()
+              io.stdout:write(string.rep("x", 100000))
+              io.stderr:write(string.rep("y", 100000))
+              return doc
+            end
+            """)
+        cmd = `$(Base.julia_cmd()) --startup-file=no --project=$PROJECT -m LibPandoc -t plain -o $(joinpath(d, "out.txt")) -L $lua`
+        out, err = Pipe(), Pipe()
+        p = Base.run(pipeline(cmd; stdin = IOBuffer("hi"), stdout = out, stderr = err); wait = false)
+        close(out.in)
+        close(err.in)
+        @test timedwait(() -> isfile(mark) || process_exited(p), 120) === :ok
+        sleep(1)
+        o, e = (@async Base.read(out, String)), (@async Base.read(err, String))
+        timedwait(() -> process_exited(p), 120) === :ok || kill(p, Base.SIGKILL)
+        wait(p)
+        @test fetch(o) == "x"^100000
+        @test count(==('y'), fetch(e)) == 100000
+    end
+end
+
+@testset "a program reading its own standard output" begin
+    # A library call leaves the standard streams as Julia has them: with
+    # them blocking, this program (its reader a task of the thread the call
+    # holds) waited forever on a write the pipe can't hold.
+    code = """
+        import LibPandoc, Panir
+        big(d::Panir.Pandoc, ctx) = (print(stdout, "x"^200000); nothing)
+        orig = stdout
+        rd, wr = redirect_stdout()
+        reader = @async read(rd, String)
+        LibPandoc.convert("hi"; to = "plain", filters = [big])
+        redirect_stdout(orig)
+        close(wr)
+        print(length(fetch(reader)))
+        """
+    out = Pipe()
+    p = Base.run(pipeline(`$(Base.julia_cmd()) --startup-file=no --project=$PROJECT -e $code`; stdin = devnull, stdout = out); wait = false)
+    close(out.in)
+    o = @async Base.read(out, String)
+    timedwait(() -> process_exited(p), 120) === :ok || kill(p, Base.SIGKILL)
+    wait(p)
+    @test fetch(o) == "200000"
+end
+
+include("cancel.jl")
 include("sandbox.jl")
 include("confined_reads.jl")
 

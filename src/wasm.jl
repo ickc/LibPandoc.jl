@@ -163,7 +163,8 @@ The environment variables a JSON filter run by libpandoc gets: pandoc's
 (`PANDOC_VERSION`, `PANDOC_READER_OPTIONS`) and libpandoc's (the formats
 with extensions, `PANDOC_WRITER_OPTIONS`: without `variables` if it would
 be longer than 32,000 bytes, an environment variable's limit on Windows,
-as libpandoc does).
+as libpandoc does; `PANDOC_SANDBOX`, `"true"` or `"false"`, whether the
+conversion is sandboxed: true in the directory sandbox).
 """
 function _filter_env(c::Conversion)
     env = ["PANDOC_VERSION" => _version_string(),
@@ -176,6 +177,7 @@ function _filter_env(c::Conversion)
         sizeof(text) > 32_000 && (text = JSON.json(Dict(k => v for (k, v) in w if k != "variables")))
         push!(env, "PANDOC_WRITER_OPTIONS" => text)
     end
+    c.sandbox === nothing || push!(env, "PANDOC_SANDBOX" => string(c.sandbox))
     env
 end
 
@@ -566,6 +568,52 @@ function _with_clock(f, w)
         c.users -= 1
         unlock(c.lock)
     end
+end
+
+# -- stopped from outside: a cancel token ------------------------------------------
+
+# Advance the epoch, if wasm ran in this process: a store a token watches
+# then looks at it at once (every other store's time limit comes one tick,
+# 10 ms, nearer).
+function _interrupt()
+    w = _WASMTIME[]
+    w === nothing || @ccall libwasmtime.wasmtime_engine_increment_epoch(w.engine::Ptr{Cvoid})::Cvoid
+    nothing
+end
+
+# A store a cancel token stops (`_interrupt`), or its time limit (checked
+# at each tick of the clock): its epoch deadline is the next tick, and at
+# each one `_on_epoch` decides. `reason`: :cancelled or :timeout once it
+# stopped the store (its call fails then).
+mutable struct _Watch
+    token::CancelToken
+    deadline::Union{Nothing, Float64}   # `_now()`'s
+    @atomic reason::Union{Nothing, Symbol}
+end
+
+# wasmtime's epoch deadline callback: going on (a tick more), or an error.
+# Nothing may throw or yield here (inside wasmtime's call).
+function _on_epoch(ctx::Ptr{Cvoid}, env::Ptr{Cvoid}, delta::Ptr{UInt64}, kind::Ptr{UInt8})::Ptr{Cvoid}
+    w = unsafe_pointer_to_objref(env)::_Watch   # (alive: preserved by the run)
+    if iscancelled(w.token)
+        @atomic w.reason = :cancelled
+    elseif w.deadline !== nothing && _now() >= w.deadline
+        @atomic w.reason = :timeout
+    else
+        unsafe_store!(delta, UInt64(1))
+        unsafe_store!(kind, 0x00)   # WASMTIME_UPDATE_DEADLINE_CONTINUE
+        return C_NULL
+    end
+    msg = "stopped from outside"
+    @ccall libwasmtime.wasmtime_error_new(msg::Cstring)::Ptr{Cvoid}
+end
+
+# Watch `store` (its context `ctx`) with `w`: kept alive by the caller.
+function _watch!(store, ctx, w::_Watch)
+    cb = @cfunction(_on_epoch, Ptr{Cvoid}, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{UInt64}, Ptr{UInt8}))
+    @ccall libwasmtime.wasmtime_store_epoch_deadline_callback(store::Ptr{Cvoid}, cb::Ptr{Cvoid},
+        pointer_from_objref(w)::Ptr{Cvoid}, C_NULL::Ptr{Cvoid})::Cvoid
+    @ccall libwasmtime.wasmtime_context_set_epoch_deadline(ctx::Ptr{Cvoid}, UInt64(1)::UInt64)::Cvoid
 end
 
 # -- the engine and the linker, shared by every filter ---------------------------

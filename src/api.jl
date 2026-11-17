@@ -132,6 +132,13 @@ formats, bytes for binary ones (docx, pdf, ...), and `""` when
 `filters` may mix pandoc's (Lua or JSON filter paths, `"citeproc"`) with
 Julia ones, in order, all inside the one pandoc run (see [`LibPandoc`](@ref)).
 
+`cancel = token` (a [`CancelToken`](@ref)) stops the conversion when the
+token is cancelled, from another task or a filter: a `PandocError` of kind
+`"Cancelled"`; in the REPL, Ctrl-C stops it (cancelling that token) when
+it is made on thread 1 and that is Julia's interactive thread (see
+`CancelToken`).
+They stop what `timeout` stops.
+
 libpandoc's own options: `untrusted = true` (for options from code you
 don't trust: only those that read, write, fetch and run nothing, with
 pandoc's sandbox on), and `timeout` (seconds): a conversion still running
@@ -155,16 +162,16 @@ LibPandoc.convert("*hi*"; from = "markdown", to = "html", filters = [upper])
 LibPandoc.convert(; input_files = ["a.md"], output_file = "a.docx")
 ```
 """
-function convert(input = nothing, options::AbstractDict = Dict{String, Any}(); kw...)
+function convert(input = nothing, options::AbstractDict = Dict{String, Any}(); cancel = nothing, kw...)
     opts = _options(options, kw)
     _input(input, opts)
     dirs = _sandbox_of(opts)
     out = if dirs !== nothing
-        _sandboxed_convert(opts, input, dirs)
+        _interruptible((t, _) -> _sandboxed_convert(opts, input, dirs, t), cancel)
     else
         cbs, entries = _plan(get(opts, "filters", ()), opts)
         isempty(cbs) || (opts = merge(opts, Dict("filters" => entries)))
-        _convert(_json(opts), input, cbs)
+        _interruptible((t, own) -> _convert(_json(_with_token(opts, t, own)), input, cbs), cancel)
     end
     # (output-file null or "-": pandoc's standard output, which is `out`)
     get(opts, "output-file", nothing) isa AbstractString && opts["output-file"] != "-" && return ""
@@ -195,17 +202,17 @@ end
 
 Parse `text` (a string or bytes; `nothing` for the options'
 `input_files`) into a document, converting as [`convert`](@ref) does
-(filters, `timeout`, ...) to pandoc's JSON. The format is an argument or
+(filters, `timeout`, `cancel`, ...) to pandoc's JSON. The format is an argument or
 the option `from` (or `reader`), not both. Given the conversion a filter
 runs in (`ctx.conversion`), read it the way that conversion reads its
 input, as [`read_many`](@ref) does: for a filter that parses a fragment.
 """
-function read(text, from::Union{Nothing, AbstractString} = nothing; kw...)
+function read(text, from::Union{Nothing, AbstractString} = nothing; cancel = nothing, kw...)
     opts = _options(Dict{String, Any}(), kw)
     _refuse(opts, ("to", "writer", "output-file"), "read (its output is the document)")
     _format!(opts, from, ("from", "reader"), "markdown")
     opts["to"] = "json"
-    Panir.parse(convert(text, opts))
+    Panir.parse(convert(text, opts; cancel))
 end
 
 read(text, c::Conversion; kw...) = only(read_many([text], c; kw...))
@@ -224,9 +231,12 @@ call's: it returns within about that long, a text not read by then failing
 with a `PandocError` of kind `"Timeout"`. The readers' warnings (an include
 file not found) are logged, as `convert`'s.
 
-A text that can't be read throws its `PandocError` (the first one's); with
-`return_exceptions = true` each such error is in the result in its text's
-place instead, the others' documents kept.
+A text that can't be read throws its `PandocError` (the first one's),
+whose message names it `reading input N`, N its place counted from 1 (in
+the message only); with `return_exceptions = true` each such error is in
+the result in its text's place instead, the others' documents kept: how a
+caller maps a failure back to where the text came from. `cancel = token`
+and Ctrl-C stop it as a whole, as `convert`.
 
 ```julia
 cells(b::CodeBlock, ctx) =
@@ -234,7 +244,7 @@ cells(b::CodeBlock, ctx) =
 ```
 """
 function read_many(texts, from::Union{Nothing, AbstractString, Conversion} = nothing;
-                   return_exceptions::Bool = false, kw...)
+                   return_exceptions::Bool = false, cancel = nothing, kw...)
     texts isa Union{AbstractString, AbstractVector{UInt8}} &&
         throw(ArgumentError("read_many takes texts, not one: read_many([text])"))
     opts = _options(Dict{String, Any}(), kw)
@@ -251,7 +261,9 @@ function read_many(texts, from::Union{Nothing, AbstractString, Conversion} = not
         throw(PandocError("PandocOptionError", "read_many: a directory sandbox is for conversions " *
                                                "(\"sandbox\": true reads no files)"))
     inputs = String[t isa AbstractVector{UInt8} ? String(copy(t)) : String(t) for t in texts]
-    out = JSON.parse(String(_read_many(_json(Dict("options" => opts, "inputs" => inputs)))))
+    out = JSON.parse(String(_interruptible(cancel) do t, own
+        _read_many(_json(Dict("options" => _with_token(opts, t, own), "inputs" => inputs)))
+    end))
     docs = Any[]
     for (i, j) in enumerate(out)
         if haskey(j, "error")
@@ -274,12 +286,13 @@ const _READ_MANY_OPTIONS = ("from", "reader", "abbreviations", "data-dir", "defa
 # The conversion's options that also apply to reading a fragment of it.
 const _READ_OPTIONS = ("abbreviations", "data-dir", "default-image-extension", "indented-code-classes",
                        "resource-path", "strip-comments", "tab-stop", "track-changes")
-# Whether a conversion is sandboxed, for what a filter reads through it; with
-# no options, that can't be told: sandboxed, failing closed.
+# Whether a conversion is sandboxed, for what a filter reads through it:
+# told so, or its options ask for it, or nothing can tell (no `sandbox`, no
+# options): failing closed.
 function _sandboxed(c::Conversion)
-    c.options === nothing && return true
-    s = get(c.options, "sandbox", nothing)
-    !(s === nothing || s === false)
+    s = c.options === nothing ? nothing : get(c.options, "sandbox", nothing)
+    asked = !(s === nothing || s === false)
+    c.sandbox === true || asked || (c.sandbox === nothing && c.options === nothing)
 end
 
 # Reader options (as pandoc gives filters) that have a defaults-file key.
@@ -296,11 +309,12 @@ reading; not filters, templates, metadata or the output.
 When the conversion is sandboxed, or when that can't be told, a fragment
 is read in pandoc's own sandbox (`"sandbox" => true`: it reads no files,
 as LaTeX's `\\input` or an RST or Org include would). A conversion is
-sandboxed when its options' `"sandbox"` is `true` or a directory sandbox
-(whose filters run in this process, outside it); it can't be told for a
-conversion with no options: pandocjl's (pandoc doesn't tell its filters
-about `--sandbox`, on the command line or in a defaults file), a script's
-run as a subprocess (made from its environment), one made by hand. And
+sandboxed when its `sandbox` is `true` (pandoc's sandbox is on, however it
+was set: libpandoc 1.13 tells its filters; a directory sandbox, whose
+filters run in this process outside it, says so too), or its options ask
+for a sandbox (`"sandbox"`: `true` or a directory sandbox); it can't be
+told when its `sandbox` is `nothing` and it has no options (one made by
+hand, or from the environment under plain pandoc). And
 the text is read as given, its tabs kept (`"preserve-tabs" => true`), as
 Lua's `pandoc.read` reads it: the `pandoc` command first replaces them by
 spaces. Options given to `read` or `read_many` beside the conversion win
@@ -334,12 +348,13 @@ end
     LibPandoc.write(doc::Panir.Pandoc, to = "html"; options...)
 
 Render a document, as `convert` from JSON would. The format is an argument
-or the option `to` (or `writer`), not both.
+or the option `to` (or `writer`), not both; options (`timeout`, `cancel`,
+...) as `convert`'s.
 """
-function write(doc::Panir.Pandoc, to::Union{Nothing, AbstractString} = nothing; kw...)
+function write(doc::Panir.Pandoc, to::Union{Nothing, AbstractString} = nothing; cancel = nothing, kw...)
     opts = _options(Dict{String, Any}(), kw)
     _refuse(opts, ("from", "reader", "input-files"), "write (its input is the document)")
     _format!(opts, to, ("to", "writer"), "html")
     opts["from"] = "json"
-    convert(Panir.serialize(doc), opts)
+    convert(Panir.serialize(doc), opts; cancel)
 end

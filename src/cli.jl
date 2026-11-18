@@ -27,13 +27,14 @@ file, run in this process, inside the conversion, when they are
   `filters` takes one (a function, or `f => traverse`);
 - a Julia filter script: `-F foo.jl` that ends with Panir's `run_filter`
   (others run as a subprocess of this Julia, see `LibPandoc` on scripts);
-- a wasm filter: `-F foo.wasm`, run by wasmtime.
+- a wasm filter: `-F foo.wasm`, run by wasmtime, seeing no directory
+  unless `\$LIBPANDOC_WASM_DIRS` gives some (see [`WasmFilter`](@ref)).
 
 With `\$LIBPANDOC_SANDBOX` or `\$LIBPANDOC_SANDBOX_WRITE` set, it is the
 pandoc command of libpandoc.wasm, in the directory sandbox they list (the
 README's "Security"): the filters above run in this process as without it
-(a wasm filter seeing the same directories), Lua filters inside, JSON
-filters not at all.
+(a wasm filter seeing its own directories, not the sandbox's), Lua
+filters inside, JSON filters not at all.
 
 They are looked for as pandoc does (as given, then in the user data
 directory's `filters/`). Other filters run as with pandoc. Installed as an
@@ -87,7 +88,7 @@ function _main(args::Vector{String}, m, dirs)
     filters_json, cbs = nothing, _Callback[]
     if haskey(parsed, "filters")
         cbs, entries = try
-            _plan(parsed["filters"], nothing; packages = true, args, mounts = m)
+            _plan(parsed["filters"], nothing; packages = true, args)
         catch e
             println(stderr, PROG, ": ", sprint(showerror, e))
             return FILTER_FAILED

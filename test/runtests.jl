@@ -56,6 +56,20 @@ function pandocjl(args...; input = "", env = Dict{String, String}(), dir = pwd()
     p.exitcode, replace(String(take!(out)), "\r\n" => "\n"), String(take!(err))
 end
 
+# An absolute path as the module, or a wasm filter, names it: on Windows
+# C:\x is /c/x.
+function named(p)
+    s = replace(String(p), '\\' => '/')
+    Sys.iswindows() && length(s) > 1 && s[2] == ':' ? "/$(lowercase(s[1]))$(s[3:end])" : s
+end
+
+# What `f()` threw (nothing if it returned).
+refused_with(f) = try f(); nothing catch e; e end
+
+# No directories for wasm filters but those a test gives (it sets the
+# variable with `withenv`, or in a child's environment).
+delete!(ENV, "LIBPANDOC_WASM_DIRS")
+
 upper(s::Str) = Str(uppercase(s.text))
 _filter_env_of(w) = P._filter_env(Conversion(; writer_options = w))
 demote(h::Header) = (h.level += 1; nothing)
@@ -544,28 +558,143 @@ end
             @test !contains(JSON.json(a), "SECRET")
             @test contains(Panir.stringify(P.read(tex, "latex")), "SECRET")   # natively it is read
         end
-        # what it may see: the current directory, read-only
-        mktempdir() do d
-            Base.write(joinpath(d, "in.txt"), "included")
-            cd(d) do
-                @test P.convert("```include\nin.txt\n```"; to = "plain", filters = [wasm("include")]) |> contains("included")
-            end
-            e = try
-                cd(() -> P.convert("```include\n/etc/passwd\n```"; to = "plain", filters = [wasm("include")]), d)
+        # what it may see: only what it is given (none by default)
+        mktempdir() do base
+            base = realpath(base)   # (the working directory's: macOS's /var is /private/var)
+            dir, other = mkpath(joinpath(base, "given")), mkpath(joinpath(base, "other"))
+            Base.write(joinpath(dir, "part.txt"), "included")
+            Base.write(joinpath(other, "secret.txt"), "CANARY-WASM-API")
+            run(f, file) = cd(() -> P.convert("```include\n$file\n```\n"; to = "plain", filters = [f]), base)
+            # (its message: the filter's own exception)
+            failure(f, file) = try
+                run(f, file)
+                nothing
             catch e
-                e
+                e isa FilterError ? sprint(showerror, e.exception) : rethrow()
             end
-            @test e isa FilterError && contains(sprint(showerror, e.exception), "exited with status 3")
+            # the directory given, as the filter's current directory
+            @test strip(run(WasmFilter(wasm("include"); preopens = [(dir, ".", false)]), "part.txt")) == "included"
+            # given as the variable gives it: by its absolute path, and its real one
+            for d in (dir, joinpath(base, ".", "given")), part in (named(joinpath(dir, "part.txt")), "given/part.txt")
+                @test strip(run(WasmFilter(wasm("include"); dirs = [d]), part)) == "included"
+            end
+            # and through a link to it, by the link's name and the real one
+            if !Sys.iswindows()
+                link = joinpath(base, "link")
+                symlink(dir, link)
+                for part in (named(joinpath(link, "part.txt")), named(joinpath(dir, "part.txt")))
+                    @test strip(run(WasmFilter(wasm("include"); dirs = [link]), part)) == "included"
+                end
+            end
+            # what is outside is missing
+            msg = failure(WasmFilter(wasm("include"); dirs = [dir]), named(joinpath(other, "secret.txt")))
+            @test endswith(msg, "exited with status 3") && !contains(msg, "CANARY")
+            # none by default: the file can't be read, the filter's failure
+            # fails the conversion, and says it had none (and where they come from)
+            withenv(P.DIRS_VAR => nothing) do
+                @test endswith(failure(wasm("include"), "given/part.txt"),
+                               "exited with status 3 (it was given no directory: LIBPANDOC_WASM_DIRS)")
+            end
+            @test endswith(failure(WasmFilter(wasm("include"); dirs = String[]), "given/part.txt"),
+                           "exited with status 3 (it was given no directory)")
+            # a directory that doesn't exist, or isn't one: it fails before it runs
+            for (d, says) in ((joinpath(base, "nope"), "does not exist"), (joinpath(dir, "part.txt"), "is not a directory"))
+                msg = failure(WasmFilter(wasm("include"); dirs = [d]), "given/part.txt")
+                @test contains(msg, "include.wasm: $d $says") && !contains(msg, P.DIRS_VAR)
+            end
+            # given as a list or a pair, refused: `dirs` lists directories
+            @test_throws ArgumentError WasmFilter(wasm("include"); dirs = dir)
+            @test_throws ArgumentError WasmFilter(wasm("include"); dirs = ["." => "."])
+            @test_throws ArgumentError WasmFilter(wasm("include"); preopens = [(dir, ".")])
+            # LIBPANDOC_WASM_DIRS gives a filter made without directories its,
+            # read when it runs; a program's own choice replaces it
+            withenv(P.DIRS_VAR => dir) do
+                f = wasm("include")
+                @test strip(run(f, "given/part.txt")) == "included"
+                @test strip(run(WasmFilter(f), named(joinpath(dir, "part.txt")))) == "included"
+                @test endswith(failure(WasmFilter(f; dirs = String[]), "given/part.txt"),
+                               "exited with status 3 (it was given no directory)")
+                @test endswith(failure(WasmFilter(f; dirs = [other]), "given/part.txt"), "exited with status 3")
+            end
             # read-only, unless it is told otherwise
-            e = try
-                cd(() -> P.convert("```write\nout.txt\n```"; to = "plain", filters = [wasm("misbehave")]), d)
-            catch e
-                e
+            write(w) = cd(() -> P.convert("```write\nout.txt\n```"; to = "plain",
+                                          filters = [WasmFilter(wasm("misbehave"); preopens = [(dir, ".", w)])]), base)
+            @test refused_with(() -> write(false)) isa FilterError && !isfile(joinpath(dir, "out.txt"))
+            write(true)
+            @test isfile(joinpath(dir, "out.txt"))
+        end
+        # the names it sees each directory by, and those it doesn't: in the
+        # working directory of `work`, with `common` beside it
+        mktempdir() do base
+            base = realpath(base)
+            for d in ("work/img", "common", "secret")
+                mkpath(joinpath(base, d))
             end
-            @test e isa FilterError && !isfile(joinpath(d, "out.txt"))
-            cd(() -> P.convert("```write\nout.txt\n```"; to = "plain",
-                               filters = [WasmFilter(wasm("misbehave"); writable = true)]), d)
-            @test isfile(joinpath(d, "out.txt"))
+            for (f, text) in ("work/here.txt" => "HERE-OK", "work/img/in.txt" => "IMG-OK", "common/part.txt" => "COMMON-OK",
+                              "secret/secret.txt" => "CANARY-WASM-DIRS", "a-file.txt" => "not a directory")
+                Base.write(joinpath(base, f), text)
+            end
+            Sys.iswindows() || symlink("../secret/secret.txt", joinpath(base, "work", "link-out.txt"))
+            sep = Sys.iswindows() ? ";" : ":"
+            # (output, or the filter's failure) with the variable listing `dirs`
+            include(dirs, file) = withenv(P.DIRS_VAR => join(dirs, sep)) do
+                try
+                    strip(cd(() -> P.convert("```include\n$file\n```\n"; to = "plain", filters = [wasm("include")]),
+                             joinpath(base, "work")))
+                catch e
+                    e isa FilterError || rethrow()
+                    msg = sprint(showerror, e.exception)
+                    @test !contains(msg, "CANARY")
+                    msg
+                end
+            end
+            missing_ = r"exited with status 3$"
+            # empty: none
+            @test endswith(include([""], "here.txt"), "(it was given no directory: LIBPANDOC_WASM_DIRS)")
+            # the working directory, as `.`, and by its absolute path
+            @test include(["."], "here.txt") == "HERE-OK"
+            @test include(["."], "img/in.txt") == "IMG-OK"
+            @test include(["."], named(joinpath(base, "work", "here.txt"))) == "HERE-OK"
+            @test contains(include(["."], "../common/part.txt"), missing_)
+            @test include([joinpath(base, "work")], "here.txt") == "HERE-OK"
+            # its parent, as `..` (an include through `..`), and the working
+            # directory as `.` inside it
+            @test include([".."], "../common/part.txt") == "COMMON-OK"
+            @test include([".."], "here.txt") == "HERE-OK"
+            @test include([".."], named(joinpath(base, "common", "part.txt"))) == "COMMON-OK"
+            # a sibling, and a list
+            @test include(["../common"], "../common/part.txt") == "COMMON-OK"
+            @test contains(include(["../common"], "here.txt"), missing_)
+            @test include([".", "../common"], "here.txt") == "HERE-OK"
+            @test include([".", "../common"], "../common/part.txt") == "COMMON-OK"
+            # a subdirectory: only below it
+            @test include(["img"], "img/in.txt") == "IMG-OK"
+            @test contains(include(["img"], "here.txt"), missing_)
+            # not normalised (wasi-libc matches the names as written)
+            @test contains(include(["img"], "./img/in.txt"), missing_)
+            for file in ("./../common/part.txt", "img/../../common/part.txt")
+                @test contains(include([".", "../common"], file), missing_)
+            end
+            # outside what was given: missing
+            @test contains(include([".", "../common"], named(joinpath(base, "secret", "secret.txt"))), missing_)
+            @test contains(include([".", "../common"], "../secret/secret.txt"), missing_)
+            Sys.iswindows() || @test contains(include(["."], "link-out.txt"), missing_)
+            # a directory that doesn't exist, a file: the filter fails, naming it
+            @test contains(include([".", "nope"], "here.txt"), "include.wasm: LIBPANDOC_WASM_DIRS: nope does not exist")
+            file = joinpath("..", "a-file.txt")
+            @test contains(include([file], "here.txt"), "include.wasm: LIBPANDOC_WASM_DIRS: $file is not a directory")
+            # pandocjl: the variable, and what the filter says (its standard error)
+            status, out, err = pandocjl("-t", "plain", "-F", wasm("include"); input = "```include\nhere.txt\n```\n",
+                                        env = Dict(P.DIRS_VAR => "."), dir = joinpath(base, "work"))
+            @test (status, strip(out)) == (0, "HERE-OK")
+            status, out, err = pandocjl("-t", "plain", "-F", wasm("include"); input = "```include\nhere.txt\n```\n",
+                                        env = Dict(P.DIRS_VAR => ""), dir = joinpath(base, "work"))
+            @test status == 83 && contains(err, "exited with status 3 (it was given no directory: LIBPANDOC_WASM_DIRS)")
+            for file in ("./../common/part.txt", "img/../../common/part.txt")
+                status, out, err = pandocjl("-t", "plain", "-F", wasm("include"); input = "```include\n$file\n```\n",
+                                            env = Dict(P.DIRS_VAR => join([".", "../common"], sep)), dir = joinpath(base, "work"))
+                @test status == 83 && contains(err, "Operation not permitted") && !contains(out * err, "CANARY")
+            end
         end
         # limits: time and memory
         failure(f, input) = try
@@ -694,6 +823,11 @@ end
         if !isempty(WASM)
             status, out, _ = pandocjl("-t", "plain", "-F", wasm("upper"); input = "a *b*")
             @test status == 0 && out == "A B\n"
+            # a filter that fails: as pandoc fails for a JSON filter, the
+            # message saying it was given no directory
+            status, _, err = pandocjl("-t", "plain", "-F", wasm("include"); input = "```include\nupper.jl\n```\n",
+                                      env = Dict(P.DIRS_VAR => ""), dir = d)
+            @test status == 83 && contains(err, "(it was given no directory: LIBPANDOC_WASM_DIRS)")
         end
     end
 end

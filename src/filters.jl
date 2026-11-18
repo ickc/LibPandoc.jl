@@ -64,10 +64,8 @@ The callbacks for the filters that run in this process, and pandoc's
 "filters" option naming them. Consecutive Julia filters share one callback
 (one parse of the document); a script or a wasm filter is one each.
 `packages`: a JSON filter's name may be a Julia package's (pandocjl).
-`mounts`: a directory sandbox's, which its wasm filters see.
 """
-function _plan(@nospecialize(filters), @nospecialize(options); packages::Bool = false, args = String[],
-               mounts = nothing)
+function _plan(@nospecialize(filters), @nospecialize(options); packages::Bool = false, args = String[])
     filters isa Union{AbstractVector, Tuple} ||
         throw(ArgumentError("filters: a vector of filters, not $(repr(filters)): filters = [f]"))
     cbs = _Callback[]
@@ -96,11 +94,11 @@ function _plan(@nospecialize(filters), @nospecialize(options); packages::Bool = 
         if f isa RawFilter
             add(_raw(f, options))
         elseif f isa WasmFilter
-            add(_raw(RawFilter(_seeing(f, mounts)), options))
+            add(_raw(RawFilter(f), options))
         elseif path !== nothing && endswith(lowercase(path), ".wasm")
             found = _find_filter(path, options, args)
             found === nothing && throw(ArgumentError("wasm filter $path not found"))
-            add(_raw(RawFilter(_seeing(_wasm_filter(found), mounts)), options))
+            add(_raw(RawFilter(_wasm_filter(found)), options))
         elseif path !== nothing && (found = _find_filter(path, options, args)) !== nothing &&
                _is_julia_script(found)
             add(_script(found, path, options))
@@ -111,10 +109,6 @@ function _plan(@nospecialize(filters), @nospecialize(options); packages::Bool = 
     flush()
     cbs, entries
 end
-
-# A wasm filter seeing its own directories, or a directory sandbox's.
-_seeing(f::WasmFilter, ::Nothing) = f
-_seeing(f::WasmFilter, m) = (json, c) -> f(json, c; dirs = _wasm_dirs(m))
 
 # -- finding filters ---------------------------------------------------------------
 

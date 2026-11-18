@@ -4,9 +4,26 @@
 # A wasm filter is a pandoc JSON filter built for WASI (`wasm32-wasip1`):
 # the document on stdin, the new one on stdout, the output format as its
 # first argument, the variables libpandoc gives JSON filters in its
-# environment (PANDOC_WRITER_OPTIONS among them). It runs sandboxed:
-# it sees only the directories it is given (the current one, read-only, by
-# default), no network. It may call pandoc through the imports of module
+# environment (PANDOC_WRITER_OPTIONS among them). It runs sandboxed: no
+# network, and only the directories it is given: by default none, as a wasm
+# filter is for code you don't trust. $LIBPANDOC_WASM_DIRS gives every filter
+# some, read-only: directories as PATH lists them (`:`, `;` on Windows; unset
+# or empty: none), read when the filter runs, as its limits are. A program
+# gives one filter its own instead (WasmFilter's `dirs` and `preopens`),
+# whatever the variable says. In a directory sandbox too: the document's list
+# and the filters' are different lists.
+#
+# The filter sees each such directory under its absolute path (C:\x as /c/x
+# on Windows), its real one too if a link leads to it, and its path relative
+# to the working directory (`.`, `..`, `../common`, `img`; none on another
+# drive), and the working directory as `.` when it lies inside one: so
+# `../common/part.txt`, `here.txt` and absolute names work as for a native
+# filter. wasi-libc matches the beginning of a path against those names as
+# written, without normalising it: `./../common/x` and `img/../../common/x`
+# don't work, nor `./img/x` when only `img` is given, nor a symbolic link
+# leaving a directory given. (libpandoc-rs's rule, the same in every host.)
+#
+# It may call pandoc through the imports of module
 # `libpandoc` (libpandoc-rs's `guest.rs`), which this host answers on this
 # process's pandoc, marked `"untrusted": true`: libpandoc then allows pandoc's
 # sandbox only, and no options that read or write files, fetch or run anything
@@ -67,12 +84,31 @@ end
 # -- a filter ------------------------------------------------------------------------
 
 """
-    WasmFilter(path; dirs = ["." => "."], writable = false, timeout = missing, max_memory = missing)
+    WasmFilter(path; dirs = nothing, preopens = nothing, timeout = missing, max_memory = missing)
 
 A wasm filter: a pandoc JSON filter built for WASI (`wasm32-wasip1`), such
 as a panir Rust filter, run in this process by wasmtime, sandboxed. It
-sees the directories `dirs` (host => guest; by default the current one,
-read-only unless `writable`), no network, and pandoc's filter variables.
+sees no network, pandoc's filter variables, and only the directories it is
+given: by default (`nothing`) those of `\$LIBPANDOC_WASM_DIRS` when it runs
+(directories as `PATH` lists them; none if unset or empty), read-only, in a
+directory sandbox too. A program gives it its own instead, whatever the
+variable says:
+
+- `dirs`, directories of this machine seen as the variable's are, read-only:
+  under their absolute paths (`C:\\x` as `/c/x`), their real paths, and
+  their paths relative to the working directory (`.`, `..`, `../common`),
+  and the working directory as `.` when it lies inside one. Looked at when
+  the filter runs: one that doesn't exist, or isn't a directory, fails it
+  then. `dirs = String[]`: none.
+- `preopens`, `(host, guest, writable)` tuples: the directory `host` seen as
+  `guest` exactly, writable if so.
+
+A filter that fails while it was given no directory says so, `(it was given
+no directory: LIBPANDOC_WASM_DIRS)` (or `(it was given no directory)` when
+the program said none). Paths aren't normalised inside: `./../x` and
+`img/../../x` don't work, nor a symbolic link leaving a directory given
+(the README's wasm filter item).
+
 It may call pandoc (libpandoc-rs's `libpandoc` crate built for wasm): in
 pandoc's sandbox, with options that name no files.
 
@@ -92,14 +128,16 @@ In `filters`, a path ending in `.wasm` is one too.
 mutable struct WasmFilter
     name::String
     mod::Ptr{Cvoid}
-    dirs::Vector{Pair{String, String}}
-    writable::Bool
+    dirs::Union{Nothing, Vector{String}}   # nothing: the variable's, when it runs
+    preopens::Union{Nothing, Vector{Tuple{String, String, Bool}}}
     timeout::Union{Nothing, Missing, Float64}
     max_memory::Union{Nothing, Missing, Int}
-    function WasmFilter(path::AbstractString; dirs = ["." => "."], writable::Bool = false,
+    function WasmFilter(path::AbstractString; dirs = nothing, preopens = nothing,
                         timeout::Union{Nothing, Missing, Real} = missing,
                         max_memory::Union{Nothing, Missing, Integer} = missing)
-        _limit("timeout", timeout; seconds = true), _limit("max_memory", max_memory; seconds = false)   # before compiling it
+        # (before compiling it, which may take seconds)
+        _limit("timeout", timeout; seconds = true), _limit("max_memory", max_memory; seconds = false)
+        dirs, preopens = _given_dirs(dirs, preopens)
         w = _wasmtime()
         bytes = Base.read(path)
         mod = Ref{Ptr{Cvoid}}(C_NULL)
@@ -107,7 +145,7 @@ mutable struct WasmFilter
                                                      length(bytes)::Csize_t, mod::Ptr{Ptr{Cvoid}})::Ptr{Cvoid}
         _check(err, "$path: not a wasm filter")
         _version_string()  # now, not from inside a conversion
-        f = new(String(path), mod[], Pair{String, String}[String(h) => String(g) for (h, g) in dirs], writable,
+        f = new(String(path), mod[], dirs, preopens,
                 _limit("timeout", timeout; seconds = true), _limit("max_memory", max_memory; seconds = false))
         finalizer(f) do f
             @ccall libwasmtime.wasmtime_module_delete(f.mod::Ptr{Cvoid})::Cvoid
@@ -116,6 +154,102 @@ mutable struct WasmFilter
 end
 
 Base.show(io::IO, f::WasmFilter) = print(io, "WasmFilter(", repr(f.name), ")")
+
+# WasmFilter's `dirs` (paths) and `preopens` ((host, guest, writable)), checked.
+function _given_dirs(dirs, preopens)
+    list(x) = x isa Union{AbstractVector, Tuple} && !(x isa AbstractString)
+    dirs === nothing || list(dirs) && all(d -> d isa AbstractString, dirs) ||
+        throw(ArgumentError("dirs: a list of directories (paths), not $(repr(dirs)): dirs = [d]; " *
+                            "for a directory under a name of your own, preopens = [(host, guest, writable)]"))
+    preopens === nothing || list(preopens) &&
+        all(p -> p isa Tuple{AbstractString, AbstractString, Bool}, preopens) ||
+        throw(ArgumentError("preopens: a list of (host, guest, writable), not $(repr(preopens))"))
+    (dirs === nothing ? nothing : String[d for d in dirs],
+     preopens === nothing ? nothing : Tuple{String, String, Bool}[(String(h), String(g), w) for (h, g, w) in preopens])
+end
+
+# -- the directories it sees ---------------------------------------------------------
+
+"The environment variable giving every wasm filter directories, read-only."
+const DIRS_VAR = "LIBPANDOC_WASM_DIRS"
+
+# The directories $LIBPANDOC_WASM_DIRS gives (empty entries skipped).
+_env_dirs() = String[d for d in split(get(ENV, DIRS_VAR, ""), Sys.iswindows() ? ';' : ':') if !isempty(d)]
+
+# Whether the program said which directories (else the variable's).
+_named(f::WasmFilter) = f.dirs !== nothing || f.preopens !== nothing
+
+"""
+The names a filter sees the host's directory `d` by, read-only, as (host,
+guest, writable): its absolute path (as the directory sandbox names its
+mounts), and its real one if a link leads to it; its path relative to the
+working directory, from their real paths; and the working directory as `.`
+if it lies strictly inside. A message instead, naming `d`, if it doesn't
+exist, isn't a directory, or can't be resolved.
+"""
+function _seen(d::String)
+    st = try
+        stat(d)
+    catch e
+        return "$d: $(_message(e))"
+    end
+    ispath(st) || return "$d does not exist"   # (a part of it a file too)
+    isdir(st) || return "$d is not a directory"
+    real, cwd = try
+        realpath(d), realpath(pwd())
+    catch e
+        return "$d: $(_message(e))"
+    end
+    names = Tuple{String, String, Bool}[]
+    # (a name WASI can't have, as a UNC path or one not UTF-8: left out)
+    for p in (d, real)
+        g = try _guest(p) catch e; e isa PandocError || rethrow(); nothing end
+        g === nothing || push!(names, (real, g, false))
+    end
+    rel = _relative(cwd, real)
+    rel === nothing || push!(names, (real, rel, false))
+    real != cwd && _inside(cwd, real) && push!(names, (cwd, ".", false))
+    names
+end
+
+# Whether the real path `p` is the real path `d` or inside it, by their parts.
+function _inside(p, d)
+    a, b = splitpath(p), splitpath(d)   # (the root first: `/`, or the drive)
+    length(a) >= length(b) && _same_root(a[1], b[1]) && a[2:length(b)] == b[2:end]
+end
+
+_same_root(a, b) = Sys.iswindows() ? lowercase(a) == lowercase(b) : a == b
+
+# The path from the directory `from` to `to`, both real paths, with `/`:
+# `.`, `..`, `../common`, `img`; nothing on another drive, or not UTF-8.
+function _relative(from, to)
+    a, b = splitpath(from), splitpath(to)
+    _same_root(a[1], b[1]) || return nothing
+    common = 1
+    while common < min(length(a), length(b)) && a[common + 1] == b[common + 1]
+        common += 1
+    end
+    parts = [fill("..", length(a) - common); b[common + 1:end]]
+    rel = isempty(parts) ? "." : join(parts, "/")
+    isvalid(rel) ? rel : nothing
+end
+
+# What the filter sees when it runs: the program's exact names, then the
+# host's directories by theirs (the first of a name kept). One that doesn't
+# exist, or isn't a directory, fails the filter, naming it (and the
+# variable, if it came from there).
+function _preopens(f::WasmFilter)
+    named = _named(f)
+    out = Tuple{String, String, Bool}[]
+    add(p) = any(q -> q[2] == p[2], out) || push!(out, p)
+    foreach(add, something(f.preopens, ()))
+    for d in (named ? something(f.dirs, String[]) : _env_dirs())
+        names = _seen(d)
+        names isa String && error(named ? "$(f.name): $names" : "$(f.name): $DIRS_VAR: $names")
+        foreach(add, names)
+    end
+    out
+end
 
 # A run's state, the store's data: the filter's stdout, the result of its
 # last call to pandoc, its deadline (`_now()`'s; nothing for none), whether
@@ -184,14 +318,14 @@ end
 """
     (f::WasmFilter)(json, conversion) -> Vector{UInt8}
 
-Run the filter on a document, as pandoc's JSON. (`dirs`: (host, guest,
-writable) instead of its own; a directory sandbox's.)
+Run the filter on a document, as pandoc's JSON (in a directory sandbox
+too, seeing its own directories, not the sandbox's).
 """
-function (f::WasmFilter)(json::Union{AbstractString, AbstractVector{UInt8}}, c::Conversion;
-                         dirs = [(h, g, f.writable) for (h, g) in f.dirs])
+function (f::WasmFilter)(json::Union{AbstractString, AbstractVector{UInt8}}, c::Conversion)
     w = _wasmtime()
     timeout = f.timeout === missing ? _parse_timeout(get(ENV, TIMEOUT_VAR, "")) : f.timeout
     max_memory = f.max_memory === missing ? _parse_memory(get(ENV, MAX_MEMORY_VAR, "")) : f.max_memory
+    dirs = _preopens(f)
     # the epoch's ticks: a huge limit is none in practice
     ticks = timeout === nothing ? _NO_DEADLINE : min(_NO_DEADLINE, ceil(timeout / _TICK) + 1)
     doc = _bytes(json)
@@ -271,6 +405,10 @@ function (f::WasmFilter)(json::Union{AbstractString, AbstractVector{UInt8}}, c::
         run.out_of_time && failed(""; interrupted = true)
         # its output went past its limit (whether it noticed the failed write or not)
         run.over === nothing || failed("$(f.name): its $(run.over) went past its memory limit")
+        # it was given no directory, which may be why it failed (its memory
+        # limit too: wasmtime's C API doesn't say whether it refused a growth)
+        msg === nothing || interrupted || !isempty(dirs) ||
+            (msg *= _named(f) ? " (it was given no directory)" : " (it was given no directory: $DIRS_VAR)")
         msg === nothing || failed(msg; interrupted)
     end
     try

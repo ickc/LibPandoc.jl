@@ -18,12 +18,6 @@ const DOES_NOT_EXIST = "does not exist (No such file or directory)"
 
 svg(text) = """<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><text>$text</text></svg>"""
 
-# An absolute path as the module names it: on Windows C:\x is /c/x.
-function named(p)
-    s = replace(String(p), '\\' => '/')
-    Sys.iswindows() && length(s) > 1 && s[2] == ':' ? "/$(lowercase(s[1]))$(s[3:end])" : s
-end
-
 struct Lab
     root::String
     work::String
@@ -342,13 +336,12 @@ end
 
 as_missing(m) = replace(m, NOT_PERMITTED => DOES_NOT_EXIST)
 walk(d) = isdir(d) ? sort([joinpath(r, f) for (r, _, fs) in walkdir(d) for f in fs]) : String[]
-refused_with(f) = try f(); nothing catch e; e end
 
 # pandocjl in `work` with the environment given (a user data directory of the
 # lab's, a time limit of 60 s unless given): (status, out, err).
 function pandocjl_in(lab, args...; input = "", env = Dict{String, String}())
     e = Dict{String, Any}("LIBPANDOC_SANDBOX" => nothing, "LIBPANDOC_SANDBOX_WRITE" => nothing,
-                          "LIBPANDOC_WASM_MAX_MEMORY" => nothing, "PANDOC_DATA_DIRS" => nothing,
+                          "LIBPANDOC_WASM_MAX_MEMORY" => nothing, "PANDOC_DATA_DIRS" => nothing, "LIBPANDOC_WASM_DIRS" => nothing,
                           "LIBPANDOC_WASM_TIMEOUT" => "60", "XDG_DATA_HOME" => lab.data, "APPDATA" => lab.data)
     merge!(e, env)
     status, out, err = withenv(e...) do
@@ -358,6 +351,8 @@ function pandocjl_in(lab, args...; input = "", env = Dict{String, String}())
 end
 
 const HERE = Dict("LIBPANDOC_SANDBOX" => ".")
+# and the same directory for wasm filters
+const HERE_AND_FILTERS = Dict("LIBPANDOC_SANDBOX" => ".", "LIBPANDOC_WASM_DIRS" => ".")
 
 if !isfile(P._wasm_path())
     @info "the directory sandbox: set LIBPANDOC_WASM to libpandoc.wasm (or download it: LibPandoc._sandbox_module()) to test it"
@@ -702,15 +697,33 @@ else
     end
 
     if !isempty(WASM)
-        @testset "a wasm filter sees the mounts" begin
-            run(file) = P.convert("```{.include}\n$file\n```\n"; to = "plain", filters = [WasmFilter(wasm("include"))],
-                                  sandbox = (read = [lab.work], write = [lab.out]))
-            @test contains(run("inside.txt"), "INSIDE-OK")
+        @testset "a wasm filter sees its own directories, not the mounts" begin
+            # the document's list and the filters' are different lists: none
+            # by default, whatever is mounted
+            run(file, f = wasm("include")) = P.convert("```{.include}\n$file\n```\n"; to = "plain", filters = [f],
+                                                       sandbox = (read = [lab.work], write = [lab.out]))
+            e = refused_with(() -> run("inside.txt"))
+            @test e isa FilterError && endswith(sprint(showerror, e.exception),
+                                                "exited with status 3 (it was given no directory: LIBPANDOC_WASM_DIRS)")
+            # the variable's directories, or the program's
+            withenv(P.DIRS_VAR => ".") do
+                @test contains(run("inside.txt"), "INSIDE-OK")
+                @test contains(run(named(joinpath(lab.work, "inside.txt"))), "INSIDE-OK")
+            end
+            @test contains(run("inside.txt", WasmFilter(wasm("include"); dirs = [lab.work])), "INSIDE-OK")
+            # a mounted directory not given to the filter, and what is outside both
             Base.write(joinpath(lab.out, "input.md"), Base.read(joinpath(lab.outside, "input.md")))
-            @test contains(run(named(joinpath(lab.out, "input.md"))), "INPUT-OK")
-            for outside in ("../secret/secret.txt", named(joinpath(lab.secret, "secret.txt")), named(joinpath(lab.outside, "input.md")))
-                e = refused_with(() -> run(outside))
-                @test e !== nothing && !contains(sprint(showerror, e), "CANARY")
+            withenv(P.DIRS_VAR => ".") do
+                for outside in (named(joinpath(lab.out, "input.md")), "../secret/secret.txt",
+                                named(joinpath(lab.secret, "secret.txt")), named(joinpath(lab.outside, "input.md")))
+                    e = refused_with(() -> run(outside))
+                    @test e isa FilterError && !contains(sprint(showerror, e), "CANARY") &&
+                          !contains(sprint(showerror, e), "INPUT-OK")
+                end
+            end
+            # a directory the document can't see, given to the filter
+            withenv(P.DIRS_VAR => lab.outside) do
+                @test contains(run(named(joinpath(lab.outside, "input.md"))), "INPUT-OK")
             end
         end
     end
@@ -873,11 +886,15 @@ else
     if !isempty(WASM)
         @testset "pandocjl: a wasm filter on the command line" begin
             status, out, _ = pandocjl_in(lab, "-t", "plain", "-F", wasm("include"), "-F", wasm("upper");
-                                         input = "```include\ninside.tex\n```\n", env = HERE)
+                                         input = "```include\ninside.tex\n```\n", env = HERE_AND_FILTERS)
             @test (status, strip(out)) == (0, "INSIDE-OK")
             status, out, err = pandocjl_in(lab, "-t", "plain", "-F", wasm("include");
-                                           input = "```include\n../secret/secret.tex\n```\n", env = HERE)
+                                           input = "```include\n../secret/secret.tex\n```\n", env = HERE_AND_FILTERS)
             @test status == 83 && !contains(out * err, "CANARY")
+            # not the mounts: none unless LIBPANDOC_WASM_DIRS gives some
+            status, out, err = pandocjl_in(lab, "-t", "plain", "-F", wasm("include");
+                                           input = "```include\ninside.tex\n```\n", env = HERE)
+            @test status == 83 && contains(err, "(it was given no directory: LIBPANDOC_WASM_DIRS)")
         end
     end
 

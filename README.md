@@ -281,12 +281,37 @@ pandocjl -F other-filter input.md              # anything else: as pandoc does
 - **A wasm filter** (`-F name.wasm`): a pandoc JSON filter built for WASI
   (`wasm32-wasip1`), such as any [panir](https://github.com/ickc/panir) Rust
   filter; see [libpandoc-rs](https://github.com/ickc/libpandoc-rs). It runs
-  in wasmtime, sandboxed: it sees the current directory, read-only, and no
-  network; nothing on the command line names more (`WasmFilter(path;
-  dirs)` does), so an include through `..`, or through a link leaving the
-  directory, is a missing file (in the directory sandbox it sees the
-  mounts instead); of the environment, only the variables pandoc gives
-  filters. It may call pandoc (libpandoc-rs's `libpandoc` crate built for
+  in wasmtime, sandboxed: no network; of the environment, only the
+  variables pandoc gives filters; and **no directory**, as a wasm filter is
+  for code you don't trust, unless `$LIBPANDOC_WASM_DIRS` gives some:
+  directories as `PATH` lists them (`:`, `;` on Windows; unset or empty:
+  none), read-only, the same for every wasm filter, in the directory
+  sandbox too, read when the filter runs (as its limits are). One that
+  doesn't exist or isn't a directory fails the filter before it runs
+  (`LIBPANDOC_WASM_DIRS: X does not exist`, `... is not a directory`). A
+  filter that fails while it was given none says so: `(it was given no
+  directory: LIBPANDOC_WASM_DIRS)`. A program gives one filter its own
+  instead, whatever the variable says: `WasmFilter(path; dirs = [...])`,
+  directories seen as the variable's are (`dirs = String[]`: none, the
+  message then `(it was given no directory)`), and `preopens = [(host,
+  guest, writable)]`, a directory seen as `guest` exactly, writable if so.
+
+  ```sh
+  LIBPANDOC_WASM_DIRS=.:../common pandocjl -F include.wasm input.md
+  ```
+
+  The filter sees each directory under its absolute path (`C:\x` as `/c/x`
+  on Windows; its real path too, if a link leads to it) and under its path
+  relative to the working directory (`.`, `..`, `../common`, `img`; none
+  on another drive), and the working directory as `.` when it lies inside
+  one: so `here.txt`, `../common/part.txt` and absolute names work as for
+  a native filter. wasi-libc matches the beginning of a path against those
+  names as written, without normalising it, so these don't work:
+  `./../common/x` and `img/../../common/x` ("Operation not permitted"),
+  `./img/x` when only `img` is given, and a symbolic link leaving a
+  directory given.
+
+  It may call pandoc (libpandoc-rs's `libpandoc` crate built for
   wasm): in pandoc's sandbox, with options that name no files (libpandoc
   checks them, `"untrusted"`: the same for every host), so the calls read
   no file, not even one the filter can read itself (citeproc takes the
@@ -405,7 +430,9 @@ Julia filters (functions, `RawFilter`s, a package's `pandoc_filter`) and
 Julia filter scripts (`-F foo.jl`) are your code, as trusted as the
 command line: they run in this process as they do without the sandbox,
 called back by the module, unconfined. Wasm filters run in this process
-too, seeing the same mounts. `pandocjl lua` and `pandoc server` are not in
+too, seeing their own directories (none, unless `$LIBPANDOC_WASM_DIRS` or
+the program gives some), not the mounts: the document's list and the
+filters' are different lists. `pandocjl lua` and `pandoc server` are not in
 the module (status 4). A filter that reads fragments with
 `read(text, ctx.conversion)` or `read_many` reads them in pandoc's own
 sandbox: no files, not even in the directories listed ("Filters"): every

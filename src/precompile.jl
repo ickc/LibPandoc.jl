@@ -42,8 +42,9 @@ precompile(_load_script, (String,))
                         main([md, "-o", joinpath(d, "out.html")])
                     end
                     # (no limits whatever the environment says: a timeout would start
-                    # the clock thread, which hangs precompiling)
-                    WasmFilter(wasm; timeout = nothing, max_memory = nothing)("{}", Conversion())
+                    # the clock thread, which hangs precompiling; no directories,
+                    # whatever LIBPANDOC_WASM_DIRS says)
+                    WasmFilter(wasm; dirs = String[], timeout = nothing, max_memory = nothing)("{}", Conversion())
                     # pandocjl's filters: planned with no options
                     _plan(Any[Dict{String, Any}("type" => "json", "path" => wasm)], nothing; packages = true, args = [md])
                     _plan(Any[Dict{String, Any}("type" => "json", "path" => "NoSuchPackage")], nothing; packages = true, args = [md])

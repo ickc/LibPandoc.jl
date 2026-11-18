@@ -22,7 +22,8 @@
 # The options and arguments go to pandoc untouched. Lua filters run inside;
 # JSON filters (programs) fail, as a PDF engine does; Julia filters and wasm
 # filters run in this process, called back by the module (its import
-# `libpandoc.filter`), a wasm filter seeing the same directories. They are
+# `libpandoc.filter`), a wasm filter seeing its own directories (none by
+# default: wasm.jl), not these. They are
 # told that the conversion is sandboxed (the context's "sandbox",
 # PANDOC_SANDBOX: true, where the module tells of pandoc's own sandbox only),
 # so that what they read through pandoc is read in its sandbox. A cancel
@@ -204,14 +205,6 @@ end
 # What a failure says when the working directory isn't mounted.
 _note(m::_Mounts) = m.cwd_mounted === nothing ?
     "(the working directory, $(m.cwd), is not in the sandbox: relative names find nothing)" : nothing
-
-# The directories a wasm filter in the conversion sees: the same, and the
-# working directory as "." when it is mounted.
-function _wasm_dirs(m::_Mounts)
-    dirs = [(host, guest, w) for (guest, host, w) in m.mounts]
-    m.cwd_mounted === nothing || push!(dirs, (".", ".", m.cwd_mounted))
-    dirs
-end
 
 # -- the module --------------------------------------------------------------------
 
@@ -559,7 +552,7 @@ end
 function _sandboxed_convert(opts, input, dirs::_Dirs, token = nothing)
     m = _Mounts(dirs)
     try
-        cbs, entries = _plan(get(opts, "filters", ()), opts; mounts = m)
+        cbs, entries = _plan(get(opts, "filters", ()), opts)
         o = Dict{String, Any}(k => v for (k, v) in opts if k != "sandbox")
         isempty(cbs) || (o["filters"] = entries)
         _sandbox_take(_sandbox_run(m, dirs, (:options, _json(o)), _bytes(input), cbs, token), m)

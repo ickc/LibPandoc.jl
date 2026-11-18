@@ -117,20 +117,21 @@ function _include_script(path)
     Pair{Any, Symbol}(f, traverse)
 end
 
-# The callback for a script: in process when it hands its filter over, else
-# a subprocess.
-function _script(path, name, @nospecialize(options))
+# A script as a member of a run: in process when it hands its filter over
+# (on the document, or on its JSON for a RawFilter or a wasm filter), else
+# a subprocess, on its JSON.
+function _script(path, @nospecialize(options))
     f = _load_script(path)
     if f === nothing
         # the conversion's time limit, counted from now (its start): pandoc
         # stops a JSON filter at it, so this one too
         t = options === nothing ? nothing : get(options, "timeout", nothing)
         deadline = t isa Real && !(t isa Bool) && t > 0 ? time() + t : nothing
-        return (json, context) -> _subprocess(path, json, context, deadline)
+        return _OnJson((json, context) -> _subprocess(path, json, context, deadline))
     end
-    run = f.first isa RawFilter ? _raw(f.first, options) :
-          f.first isa WasmFilter ? _raw(RawFilter(f.first), options) : _walks([f], options)
-    (json, context) -> _in_dir(() -> run(json, context))
+    f.first isa Union{RawFilter, WasmFilter} || return _walk(f, true)
+    run = _on_json(f.first, options).run
+    _OnJson((json, context) -> _in_dir(() -> run(json, context)))
 end
 
 """

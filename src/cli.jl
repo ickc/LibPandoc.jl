@@ -30,6 +30,10 @@ file, run in this process, inside the conversion, when they are
 - a wasm filter: `-F foo.wasm`, run by wasmtime, seeing no directory
   unless `\$LIBPANDOC_WASM_DIRS` gives some (see [`WasmFilter`](@ref)).
 
+Consecutive ones are one exchange with pandoc (one callback, one
+`Running filter libpandoc:callback/N` in pandoc's log);
+`\$LIBPANDOC_SEPARATE_FILTERS=1` makes each its own.
+
 With `\$LIBPANDOC_SANDBOX` or `\$LIBPANDOC_SANDBOX_WRITE` set, it is the
 pandoc command of libpandoc.wasm, in the directory sandbox they list (the
 README's "Security"): the filters above run in this process as without it
@@ -87,8 +91,15 @@ function _main(args::Vector{String}, m, dirs)
     end
     filters_json, cbs = nothing, _Callback[]
     if haskey(parsed, "filters")
+        separate = try
+            !isempty(parsed["filters"]) && _separate(nothing)
+        catch e
+            e isa ErrorException || rethrow()
+            println(stderr, PROG, ": ", e.msg)
+            return 1
+        end
         cbs, entries = try
-            _plan(parsed["filters"], nothing; packages = true, args)
+            _plan(parsed["filters"], nothing; packages = true, args, separate)
         catch e
             println(stderr, PROG, ": ", sprint(showerror, e))
             return FILTER_FAILED

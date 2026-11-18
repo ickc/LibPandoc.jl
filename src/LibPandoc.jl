@@ -29,16 +29,19 @@ Pandoc.convert("hi"; to = "html", filters = [upper])      # "<p>HI</p>\\n"
 - **Filters** (`filters = [...]`), in order, all in one pandoc run:
   - a Julia function with methods for the nodes to change, walked as
     `Panir.walk!` does, `ctx.conversion` saying how pandoc reads and writes;
-    `f => :topdown` (or `:bottomup`) for another order. Consecutive ones
-    share one parse of the document;
+    `f => :topdown` (or `:bottomup`) for another order;
   - `RawFilter(f)`, on pandoc's JSON as it is;
   - a Julia filter script (`"foo.jl"`), a wasm filter (`"foo.wasm"` or a
     `WasmFilter`), both in process;
   - pandoc's own: Lua filters, JSON filters (programs), `"citeproc"`.
 
-  A filter may call pandoc: `LibPandoc.read(text, ctx.conversion)` reads a
-  fragment as the document was read. What a Julia filter throws fails the
-  conversion, as a `FilterError`.
+  Consecutive filters of this process are one exchange with pandoc (Julia
+  filters one after another on one parse of the document);
+  `separate_filters = true` or `\$LIBPANDOC_SEPARATE_FILTERS=1` makes each
+  its own. A filter may call pandoc: `LibPandoc.read(text,
+  ctx.conversion)` reads a fragment as the document was read. What a filter
+  of this process throws fails the conversion, as a `FilterError` naming
+  it (`filters[N]`, from 1).
 - `pandocjl` (`LibPandoc.main`) is pandoc's command line with these
   filters in process.
 - **Threads:** conversions from different tasks and threads run in

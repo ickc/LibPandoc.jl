@@ -32,21 +32,99 @@ _conversion(context, @nospecialize(options)) = Conversion(context; options)
 _user_options(@nospecialize(opts)) = opts === nothing ? nothing :
     Dict{String, Any}(k => v for (k, v) in opts if k != "filters")
 
-# Julia filters, one after another on one parse of the document.
-function _walks(group::Vector{Pair{Any, Symbol}}, @nospecialize(options))
-    user = _user_options(options)
-    function (json::String, context)
-        c = _conversion(context, user)
-        doc = Panir.parse(json)
-        for (f, traverse) in group
-            doc = walk!(f, doc; traverse, format = c)
-        end
-        Panir.serialize(doc)
+# -- runs: consecutive filters of this process, one exchange with pandoc --------------
+
+"The environment variable that makes each filter its own exchange with pandoc (`1`)."
+const SEPARATE_VAR = "LIBPANDOC_SEPARATE_FILTERS"
+
+# Whether each filter is its own exchange: `given` (the options'
+# "separate-filters") if not `nothing`, else $LIBPANDOC_SEPARATE_FILTERS: `1`
+# yes; unset, empty or `0` no; anything else an error, as a safety switch is
+# not to be ignored.
+function _separate(given)
+    if given !== nothing
+        given isa Bool || throw(_refused("\"separate-filters\": true or false, not $(repr(given))"))
+        return given
     end
+    v = get(ENV, SEPARATE_VAR, "")
+    v in ("", "0") && return false
+    v == "1" && return true
+    error("$SEPARATE_VAR: 1 (each filter its own exchange with pandoc), or 0 or empty, not $(repr(v))")
 end
 
-_raw(r::RawFilter, @nospecialize(options)) = (user = _user_options(options);
-                               (json, context) -> r.f(json, _conversion(context, user)))
+# A member of a run on the parsed document: a Julia filter walked with
+# `traverse`; `script`: a script's, its `cd` undone when it returns.
+struct _Walk
+    f::Any
+    traverse::Symbol
+    script::Bool
+end
+
+# A member of a run on pandoc's JSON: `run(json::String, context)` returns
+# the new document's (a string or bytes): a RawFilter, a wasm filter, a
+# script run as a subprocess.
+struct _OnJson
+    run::Any
+end
+
+"""
+One callback of libpandoc's, one exchange with pandoc: consecutive filters
+of this process, each with its place in the list given (from 1). From one
+to the next: to a Julia filter after another, the same `Panir.Pandoc`; to
+one on JSON after a Julia filter, written once; to a Julia filter after one
+on JSON, parsed once; to one on JSON after another, the JSON as it was
+written, unchecked. `token`, the call's: a cancelled one stops the run
+before the next filter.
+"""
+mutable struct _Run
+    members::Vector{Pair{Int, Any}}
+    options::Any   # the conversion's, without "filters" (a filter's ctx.conversion.options)
+    token::Union{Nothing, CancelToken}
+end
+
+_text(x::String) = x
+_text(x::AbstractString) = String(x)
+_text(x::AbstractVector{UInt8}) = String(copy(x))   # (the filter may keep its vector)
+
+function (r::_Run)(json::String, context)
+    doc = nothing          # the document parsed, or
+    data::Any = json       # as JSON: pandoc's, written, or what the filter at `wrote` wrote, unchecked
+    wrote = nothing
+    for (k, (i, m)) in enumerate(r.members)
+        # (pandoc stops a cancelled conversion only when the callback returns)
+        k > 1 && r.token !== nothing && iscancelled(r.token) && throw(PandocError("Cancelled", _CANCELLED))
+        if m isa _Walk
+            if doc === nothing
+                doc = try
+                    Panir.parse(_text(data))
+                catch e
+                    throw(FilterError(e, catch_backtrace(), i, wrote, true))
+                end
+            end
+            c = _conversion(context, r.options)
+            walk() = walk!(m.f, doc; traverse = m.traverse, format = c)
+            doc = try
+                m.script ? _in_dir(walk) : walk()
+            catch e
+                throw(_named(e, catch_backtrace(), i, nothing))
+            end
+            data, wrote = nothing, nothing
+        else
+            data === nothing && (data = Panir.serialize(doc))
+            data = try
+                m.run(_text(data), context)
+            catch e
+                throw(_named(e, catch_backtrace(), i, wrote))
+            end
+            doc, wrote = nothing, i
+        end
+    end
+    data === nothing ? Panir.serialize(doc) : data
+end
+
+# A filter's failure, naming it: a FilterError, but a time limit's or a
+# cancel's PandocError as it is (`istimeout`, `iscancelled`).
+_named(e, bt, i, from) = istimeout(e) || iscancelled(e) ? e : FilterError(e, bt, i, from, false)
 
 # A Julia filter given in `filters`: a function (or anything callable), or
 # `f => traverse`.
@@ -59,55 +137,72 @@ _json_path(f::AbstractString) = (f == "citeproc" || endswith(lowercase(f), ".lua
 _json_path(f::AbstractDict) = get(f, "type", nothing) == "json" ? String(f["path"]) : nothing
 _json_path(f) = nothing
 
+_walk(f, script = false) = (p = _julia_filter(f); _Walk(p.first, p.second, script))
+_on_json(r::RawFilter, @nospecialize(options)) = (user = _user_options(options);
+                                                  _OnJson((json, context) -> r.f(json, _conversion(context, user))))
+_on_json(w::WasmFilter, @nospecialize(options)) = _on_json(RawFilter(w), options)
+
 """
 The callbacks for the filters that run in this process, and pandoc's
-"filters" option naming them. Consecutive Julia filters share one callback
-(one parse of the document); a script or a wasm filter is one each.
-`packages`: a JSON filter's name may be a Julia package's (pandocjl).
+"filters" option naming them: each stretch of consecutive ones is one
+callback (a `_Run`, one exchange with pandoc), or with `separate` each its
+own. `packages`: a JSON filter's name may be a Julia package's (pandocjl).
 """
-function _plan(@nospecialize(filters), @nospecialize(options); packages::Bool = false, args = String[])
+function _plan(@nospecialize(filters), @nospecialize(options); packages::Bool = false, args = String[],
+               separate::Bool = false)
     filters isa Union{AbstractVector, Tuple} ||
         throw(ArgumentError("filters: a vector of filters, not $(repr(filters)): filters = [f]"))
     cbs = _Callback[]
     entries = Any[]
-    group = Pair{Any, Symbol}[]
-    function add(run)
-        push!(entries, Dict("type" => "callback", "index" => length(cbs)))
-        push!(cbs, _Callback(run))
-    end
-    flush() = isempty(group) || (add(_walks(copy(group), options)); empty!(group))
-    for f in filters
+    user = _user_options(options)
+    open = false   # whether the last entry is a run that takes the next filter
+    for (i, f) in enumerate(filters)
         # (an absent option is nothing, but a list holding it is an error)
         f === nothing && throw(ArgumentError("filters: `nothing` is not a filter"))
-        if _is_julia_filter(f)
-            push!(group, _julia_filter(f))
-            continue
-        end
-        path = _json_path(f)
-        pkg = packages && path !== nothing ? _package_filter(path) : nothing
-        if pkg !== nothing && _is_julia_filter(pkg)
-            push!(group, _julia_filter(pkg))
-            continue
-        end
-        flush()
-        pkg === nothing || (f = pkg)
-        if f isa RawFilter
-            add(_raw(f, options))
-        elseif f isa WasmFilter
-            add(_raw(RawFilter(f), options))
-        elseif path !== nothing && endswith(lowercase(path), ".wasm")
-            found = _find_filter(path, options, args)
-            found === nothing && throw(ArgumentError("wasm filter $path not found"))
-            add(_raw(RawFilter(_wasm_filter(found)), options))
-        elseif path !== nothing && (found = _find_filter(path, options, args)) !== nothing &&
-               _is_julia_script(found)
-            add(_script(found, path, options))
-        else
+        m = _member(f, options, packages, args)
+        if m === nothing
             push!(entries, f)
+            open = false
+            continue
         end
+        if open
+            push!(last(cbs).run.members, i => m)
+        else
+            push!(entries, Dict("type" => "callback", "index" => length(cbs)))
+            push!(cbs, _Callback(_Run(Pair{Int, Any}[i => m], user, nothing)))
+        end
+        open = !separate
     end
-    flush()
     cbs, entries
+end
+
+# A filter as a member of a run, or `nothing` for one of pandoc's own.
+function _member(@nospecialize(f), @nospecialize(options), packages, args)
+    _is_julia_filter(f) && return _walk(f)
+    path = _json_path(f)
+    pkg = packages && path !== nothing ? _package_filter(path) : nothing
+    if pkg !== nothing
+        _is_julia_filter(pkg) && return _walk(pkg)
+        f = pkg
+    end
+    f isa Union{RawFilter, WasmFilter} && return _on_json(f, options)
+    if path !== nothing && endswith(lowercase(path), ".wasm")
+        found = _find_filter(path, options, args)
+        found === nothing && throw(ArgumentError("wasm filter $path not found"))
+        return _on_json(_wasm_filter(found), options)
+    end
+    if path !== nothing && (found = _find_filter(path, options, args)) !== nothing && _is_julia_script(found)
+        return _script(found, options)
+    end
+    nothing
+end
+
+# The call's cancel token, for the runs among `cbs` to look at.
+function _told!(cbs::Vector{_Callback}, token)
+    for cb in cbs
+        cb.run.token = token
+    end
+    cbs
 end
 
 # -- finding filters ---------------------------------------------------------------

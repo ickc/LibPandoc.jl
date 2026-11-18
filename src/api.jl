@@ -131,6 +131,12 @@ formats, bytes for binary ones (docx, pdf, ...), and `""` when
 
 `filters` may mix pandoc's (Lua or JSON filter paths, `"citeproc"`) with
 Julia ones, in order, all inside the one pandoc run (see [`LibPandoc`](@ref)).
+Consecutive filters of this process (Julia functions, `RawFilter`s, Julia
+scripts, wasm filters) are one exchange with pandoc; `separate_filters =
+true` (this package's option, not pandoc's; by default
+`\$LIBPANDOC_SEPARATE_FILTERS`, `1` on) makes each its own, so that pandoc
+reads and checks the document between any two (the README's "Consecutive
+filters").
 
 `cancel = token` (a [`CancelToken`](@ref)) stops the conversion when the
 token is cancelled, from another task or a filter: a `PandocError` of kind
@@ -168,13 +174,18 @@ LibPandoc.convert(; input_files = ["a.md"], output_file = "a.docx")
 function convert(input = nothing, options::AbstractDict = Dict{String, Any}(); cancel = nothing, kw...)
     opts = _options(options, kw)
     _input(input, opts)
+    # this package's, not pandoc's; the variable read only for a call with filters
+    given = pop!(opts, "separate-filters", nothing)
+    filters = get(opts, "filters", ())
+    separate = given === nothing && filters isa Union{AbstractVector, Tuple} && isempty(filters) ? false :
+               _separate(given)
     dirs = _sandbox_of(opts)
     out = if dirs !== nothing
-        _interruptible(t -> _sandboxed_convert(opts, input, dirs, t), cancel)
+        _interruptible(t -> _sandboxed_convert(opts, input, dirs, t; separate), cancel)
     else
-        cbs, entries = _plan(get(opts, "filters", ()), opts)
+        cbs, entries = _plan(filters, opts; separate)
         isempty(cbs) || (opts = merge(opts, Dict("filters" => entries)))
-        _interruptible(t -> _convert(_json(_with_token(opts, t)), input, cbs), cancel)
+        _interruptible(t -> _convert(_json(_with_token(opts, t)), input, _told!(cbs, t)), cancel)
     end
     # (output-file null or "-": pandoc's standard output, which is `out`)
     get(opts, "output-file", nothing) isa AbstractString && opts["output-file"] != "-" && return ""
@@ -251,6 +262,7 @@ function read_many(texts, from::Union{Nothing, AbstractString, Conversion} = not
     texts isa Union{AbstractString, AbstractVector{UInt8}} &&
         throw(ArgumentError("read_many takes texts, not one: read_many([text])"))
     opts = _options(Dict{String, Any}(), kw)
+    delete!(opts, "separate-filters")   # (no filters here: a filter's options passed on are taken)
     bad = setdiff(keys(opts), _READ_MANY_OPTIONS)
     isempty(bad) || throw(ArgumentError("read_many takes only options that affect reading, not $(join(sort!(collect(bad)), ", "))"))
     if from isa Conversion

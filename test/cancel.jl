@@ -85,13 +85,18 @@ cancel_after(t, s) = Threads.@spawn (nap(s); cancel!(t))
 
     # a Julia filter running when the token is cancelled runs to its end; the
     # call then fails. A filter may cancel its own call's token.
+    # (The token is cancelled once the filter is running, which waits to
+    # see it cancelled and goes on to its end; not after a fixed time: on a
+    # busy CI runner a call had not reached its filter by then and was
+    # cancelled before it, seen in libpandoc-rs's twin of this test.)
     t = CancelToken()
-    ran = Threads.Atomic{Bool}(false)
-    slow_filter(d::Panir.Pandoc) = (nap(1); ran[] = true; nothing)
-    c = cancel_after(t, 0.2)
-    e, took = timed(() -> P.convert("x"; to = "html", filters = [slow_filter], cancel = t))
+    started, ran = Threads.Atomic{Bool}(false), Threads.Atomic{Bool}(false)
+    until(f) = (stop = time() + LIMIT; while !f() && time() < stop; nap(0.01); end)
+    slow_filter(d::Panir.Pandoc) = (started[] = true; until(() -> iscancelled(t)); nap(0.1); ran[] = true; nothing)
+    c = Threads.@spawn (until(() -> started[]); cancel!(t))
+    e, _ = timed(() -> P.convert("x"; to = "html", filters = [slow_filter], cancel = t))
     wait(c)
-    @test iscancelled(e) && ran[] && took >= 1
+    @test iscancelled(e) && ran[]
     t = CancelToken()
     @test iscancelled(timed(() -> P.convert("x"; filters = [(d::Panir.Pandoc) -> (cancel!(t); nothing)], cancel = t))[1])
 
@@ -155,6 +160,24 @@ const CTRL_C = """
     println(LibPandoc.convert("*x*"; to = "html"))
     """
 
+# Ctrl-C to `p`; when it was sent. For a process that exits on it (`exits`),
+# on macOS, a second one 3 s later if the process is still running, as a
+# user would: Julia's exit on Ctrl-C takes thread 1 over wherever it is and
+# "can get stuck" (its signals-unix.c; it ends the process itself at a
+# second request). Seen once on macOS in CI: a script went on to its call's
+# end. Not elsewhere: on Linux a miss would be this package's (a call run
+# off thread 1 hung that exit).
+function ctrl_c(p; exits = false)
+    sent = time()
+    kill(p, Base.SIGINT)
+    if exits && Sys.isapple() && timedwait(() -> process_exited(p), 3) !== :ok
+        @info "Ctrl-C: sent again, the first did not end the process"
+        sent = time()
+        kill(p, Base.SIGINT)
+    end
+    sent
+end
+
 # (process, the line after "started", the rest, seconds from the signal to that line)
 function interrupted(threads, exit_on_sigint, sandbox = nothing; interactive = true, slow = false)
     code = replace(CTRL_C, "EXIT" => repr(exit_on_sigint), "SANDBOX" => repr(sandbox))
@@ -168,10 +191,9 @@ function interrupted(threads, exit_on_sigint, sandbox = nothing; interactive = t
     close(out.in)
     @test readline(out) == "started"
     sleep(1)
-    sent = time()
-    kill(p, Base.SIGINT)
     # (one still running a minute later is killed: the test fails, not hangs)
     Timer(_ -> process_running(p) && kill(p, Base.SIGKILL), 60)
+    sent = ctrl_c(p; exits = exit_on_sigint && !interactive)
     line = readline(out)
     took = time() - sent
     rest = Base.read(out, String)
@@ -212,8 +234,7 @@ else
             cmd = `$(Base.julia_cmd()) --startup-file=no --project=$PROJECT -m LibPandoc -t html slow.md -o slow.html`
             p = cd(() -> Base.run(pipeline(cmd; stderr = devnull); wait = false), d)
             sleep(10)
-            sent = time()
-            kill(p, Base.SIGINT)
+            sent = ctrl_c(p; exits = true)
             timedwait(() -> process_exited(p), 60) === :ok || kill(p, Base.SIGKILL)
             wait(p)
             @test p.termsignal == Base.SIGINT && time() - sent < 4

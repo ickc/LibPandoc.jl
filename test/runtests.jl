@@ -692,7 +692,9 @@ end
             # a subdirectory: only below it
             @test include(["img"], "img/in.txt") == "IMG-OK"
             @test contains(include(["img"], "here.txt"), missing_)
-            # not normalised (wasi-libc matches the names as written)
+            # not normalised (wasi-libc matches the names; a leading `./` is
+            # kept by this filter, built with lto = true, and dropped by one
+            # built without, where the two names with it work)
             @test contains(include(["img"], "./img/in.txt"), missing_)
             for file in ("./../common/part.txt", "img/../../common/part.txt")
                 @test contains(include([".", "../common"], file), missing_)
@@ -701,6 +703,9 @@ end
             @test contains(include([".", "../common"], named(joinpath(base, "secret", "secret.txt"))), missing_)
             @test contains(include([".", "../common"], "../secret/secret.txt"), missing_)
             Sys.iswindows() || @test contains(include(["."], "link-out.txt"), missing_)
+            # (even with its target's directory given: the link leaves the
+            # directory its name is opened through, the working directory)
+            Sys.iswindows() || @test contains(include([".", ".."], "link-out.txt"), missing_)
             # a directory that doesn't exist, a file: the filter fails, naming it
             @test contains(include([".", "nope"], "here.txt"), "include.wasm: LIBPANDOC_WASM_DIRS: nope does not exist")
             file = joinpath("..", "a-file.txt")

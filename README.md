@@ -302,8 +302,19 @@ pandocjl -F other-filter input.md              # anything else: as pandoc does
 
   Unlike Julia, Lua and JSON filters, which can do anything you can
   (pandoc's `--sandbox` doesn't limit filters), a wasm filter can't reach
-  past these bounds whatever pandoc's options: a filter from anywhere risks
-  the document, not your machine.
+  past these bounds by itself, whatever pandoc's options. **It can through
+  the document it returns**, which pandoc writes with your access, as it
+  writes any document: a writer that embeds files (docx, ODT, EPUB, PPTX,
+  HTML with `--embed-resources`) reads the images the document names,
+  citeproc run after the filter reads the `bibliography` in its metadata,
+  and a PDF engine reads what raw LaTeX names. A filter given no directory
+  at all can name a file it couldn't open and find it in the output
+  (tested in libpandoc-rs). So for a filter you don't trust, confine the
+  conversion too, as for a document you don't trust: the directory sandbox
+  below, where pandoc reads only what you listed (pandoc's own,
+  `sandbox = true` or `--sandbox`, covers its writers and citeproc, not a
+  PDF engine). Then a filter from anywhere risks the
+  document and the directories you listed, not your machine.
 
 Filters are looked for as pandoc does: as given, then in the user data
 directory's `filters/`. Install it as a [Julia app](https://pkgdocs.julialang.org/v1/apps/):

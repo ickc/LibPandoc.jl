@@ -184,15 +184,20 @@ end
     @test timeout(() -> P.read(slow; timeout = 0.5))
     @test P.convert("x"; to = "plain", timeout = 30) == "x\n"   # and the next call works
     # read_many: the whole call's limit; a text not read in time fails alone
+    # (a longer limit where each text's result is looked at: the call's
+    # setup must end within it, or the whole call fails, as documented; with
+    # 0.5 s it did once in libpandoc-python's twin of this test, on a macOS
+    # Intel CI runner)
     @test timeout(() -> P.read_many(["a", slow]; timeout = 0.5))
-    docs = P.read_many(["a", slow, "[x"]; timeout = 0.5, return_exceptions = true)
+    docs = P.read_many(["a", slow, "[x"]; timeout = 3, return_exceptions = true)
     @test docs[1] isa Panir.Pandoc && istimeout(docs[2]) && !istimeout(docs[1]) && !istimeout(ErrorException("Timeout"))
     @test docs[3] isa Panir.Pandoc
     @test P.read_many(["a"]) isa Vector{Panir.Pandoc}
-    # code in this process runs to its end, and the call fails then
-    nap(d::Panir.Pandoc) = (sleep(1); nothing)
-    t = @elapsed @test timeout(() -> P.convert("x"; to = "html", timeout = 0.2, filters = [nap]))
-    @test t >= 1
+    # code in this process runs to its end, and the call fails then (a
+    # limit the call reaches its filter within, on a slow CI runner too)
+    nap(d::Panir.Pandoc) = (sleep(2); nothing)
+    t = @elapsed @test timeout(() -> P.convert("x"; to = "html", timeout = 1, filters = [nap]))
+    @test t >= 2
 end
 
 @testset "run" begin

@@ -203,7 +203,7 @@ end
         Base.write(joinpath(d, "a.jl"), "using Panir\nrun_filter((d::Panir.Pandoc) -> (push!(d.blocks, Para(\"a\")); nothing))")
         Base.write(joinpath(d, "add.lua"), LUA_ADD)
         Base.write(joinpath(d, "garble.jl"), "using LibPandoc, Panir\nrun_filter(RawFilter((json, c) -> \"{}\"))")
-        ran(err) = [l[length("[INFO] Running filter ") + 1:end] for l in split(err, '\n') if startswith(l, "[INFO] Running filter ")]
+        ran(err) = [l[length("[INFO] Running filter ") + 1:end] for l in readlines(IOBuffer(err)) if startswith(l, "[INFO] Running filter ")]
         args = ("--verbose", "-t", "plain", "-F", "a.jl", "-F", "a.jl", "-L", "add.lua", "-F", "a.jl")
         status, out, err = pandocjl(args...; input = "hi", dir = d, env = Dict(SEPARATE => ""))
         @test status == 0 && paras(out) == ["hi", "a", "a", "lua", "a"]

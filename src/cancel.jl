@@ -81,8 +81,13 @@ Stop every call using `token`, running or to come. From any task or thread
 (not a raw signal handler's C code).
 """
 function cancel!(t::CancelToken)
+    # pandoc first, then the flag: once `iscancelled` says so, pandoc knows (a
+    # filter that sees it and returns can't let a short conversion end well);
+    # the flag before the epoch advances, which has the directory sandbox look
+    # at it. (pandoc_cancel may wait for the runtime: GC-safe meanwhile.)
+    id = t.id
+    id > 0 && @ccall gc_safe = true $(_load().cancel)(id::Int64)::Cint
     @atomic t.cancelled = true
-    t.id > 0 && ccall(_load().cancel, Cint, (Int64,), t.id)
     _interrupt()
     nothing
 end
@@ -93,7 +98,9 @@ end
 
 Whether `cancel!(token)` was called; whether `e` is a `PandocError` of a
 call stopped by its token (kind `"Cancelled"`), as libpandoc-rs's
-`is_cancelled`.
+`is_cancelled`. Once `iscancelled(token)` is true, every call using the
+token fails as cancelled: a filter that sees it and returns can rely on its
+conversion failing so.
 """
 iscancelled(t::CancelToken) = @atomic t.cancelled
 iscancelled(e) = e isa PandocError && e.kind == "Cancelled"

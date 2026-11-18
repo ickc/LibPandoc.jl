@@ -27,7 +27,9 @@
 # told that the conversion is sandboxed (the context's "sandbox",
 # PANDOC_SANDBOX: true, where the module tells of pandoc's own sandbox only),
 # so that what they read through pandoc is read in its sandbox. A cancel
-# token stops the module from outside, as the time limit does.
+# token stops the module from outside, as the time limit does (with
+# untrusted options too: it is never in the options the module gets), and
+# once a filter returns after a cancel.
 #
 # Threads: the module runs on the calling task, and the filters it calls
 # back run there too, inside wasmtime's call. wasmtime keeps per-thread
@@ -363,9 +365,11 @@ function _peek(ctx, mem, p, n = nothing)
     rest[1:n]
 end
 
-# A run's state, the store's data: the callbacks, by index.
+# A run's state, the store's data: the callbacks, by index, and the call's
+# cancel token.
 mutable struct _SandboxRun
     cbs::Vector{_Callback}
+    token::Union{Nothing, CancelToken}
 end
 
 # `libpandoc.filter(index, doc, doc_len, context, context_len, out)`: the
@@ -392,6 +396,11 @@ function _import_filter(env::Ptr{Cvoid}, caller::Ptr{Cvoid}, args::Ptr{UInt64}, 
                 answer = codeunits(_message(e))
             end
         end
+        # cancelled while the filter ran: stopped now (a trap), not at the
+        # epoch's next tick, which the module could outrun (a filter that saw
+        # the token cancelled and returned before `cancel!` advanced the
+        # epoch). (A filter that failed fails the call as natively.)
+        status == 0 && run.token !== nothing && iscancelled(run.token) && throw(PandocError("Cancelled", _CANCELLED))
         c = @ccall libwasmtime.wasmtime_caller_context(caller::Ptr{Cvoid})::Ptr{Cvoid}
         p = _put(c, caller, answer)
         _invoke(c, _export(c, caller, "pandoc_buffer_set", _EXTERN_FUNC), (out, p, length(answer)), 0)
@@ -442,7 +451,7 @@ function _sandbox_run(m::_Mounts, dirs::_Dirs, call, input, cbs::Vector{_Callbac
                                                          (writable ? 3 : 1)::Csize_t, (writable ? 3 : 1)::Csize_t)::Bool
     end
     ok || (@ccall libwasmtime.wasi_config_delete(wasi::Ptr{Cvoid})::Cvoid; throw(_refused("sandbox: wasmtime can't open a directory or take the environment")))
-    run = _SandboxRun(cbs)
+    run = _SandboxRun(cbs, token)
     store = @ccall libwasmtime.wasmtime_store_new(w.engine::Ptr{Cvoid}, pointer_from_objref(run)::Ptr{Cvoid}, C_NULL::Ptr{Cvoid})::Ptr{Cvoid}
     started = _now()
     watch = token === nothing ? nothing : _Watch(token, timeout === nothing ? nothing : started + timeout, nothing)
@@ -473,7 +482,9 @@ function _sandbox_run(m::_Mounts, dirs::_Dirs, call, input, cbs::Vector{_Callbac
     catch e
         e isa _Stopped || rethrow()
         reason = watch === nothing ? nothing : @atomic watch.reason
-        reason === :cancelled && throw(PandocError("Cancelled", _CANCELLED))
+        # (stopped by the epoch, or when a filter returned after a cancel)
+        (reason === :cancelled || reason === nothing && watch !== nothing && iscancelled(watch.token)) &&
+            throw(PandocError("Cancelled", _CANCELLED))
         reason === :timeout && (e = _Stopped(e.message, true, nothing))
         throw(_stopped(e, dirs, timeout, max_memory, started))
     finally

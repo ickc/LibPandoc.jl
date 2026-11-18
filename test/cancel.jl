@@ -171,6 +171,22 @@ end
     @test P.convert("*x*"; to = "html", sandbox, untrusted = true, cancel = CancelToken()) == "<p><em>x</em></p>\n"
     e, _ = timed(() -> P.convert("x", Dict("sandbox" => sandbox, "untrusted" => true, "cancel-token" => CancelToken().id)))
     @test e isa PandocError && e.kind == "PandocOptionError" && contains(e.message, "cancel-token")
+    # a Julia filter running when the token is cancelled runs to its end, and
+    # the call then fails: once `iscancelled` is true the module is stopped
+    # when the filter returns, not at the epoch's next tick (no time limit:
+    # only the cancel advances the epoch). The filter may cancel the token.
+    unlimited = (read = String[], timeout = 0)
+    t = CancelToken()
+    started, ran = Threads.Atomic{Bool}(false), Threads.Atomic{Bool}(false)
+    until(f) = (stop = time() + LIMIT; while !f() && time() < stop; nap(0.01); end)
+    slow_filter(d::Panir.Pandoc) = (started[] = true; until(() -> iscancelled(t)); nap(0.1); ran[] = true; nothing)
+    c = Threads.@spawn (until(() -> started[]); cancel!(t))
+    e, _ = timed(() -> P.convert("x"; to = "html", filters = [slow_filter], sandbox = unlimited, cancel = t))
+    wait(c)
+    @test iscancelled(e) && ran[]
+    t = CancelToken()
+    @test iscancelled(timed(() -> P.convert("x"; filters = [(d::Panir.Pandoc) -> (cancel!(t); nothing)],
+                                            sandbox = unlimited, cancel = t))[1])
     # cancelled once the call has begun but before the store is watched
     # (while the module loads): stopped when it is, with no time limit (no
     # clock moving the epoch after the cancel's own move)

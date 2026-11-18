@@ -913,7 +913,12 @@ else
         Base.write(joinpath(lab.work, "quotes.md"), ">"^100_000)
         status, _, err = pandocjl_in(lab, "quotes.md", "-t", "html"; env = merge(HERE, Dict("LIBPANDOC_WASM_TIMEOUT" => "2")))
         after = match(r"stopped after ([0-9.]+) ", err)
-        @test status != 0 && after !== nothing && 2.0 <= parse(Float64, after[1]) < 4.0
+        # Stopped by the limit and not before it. A slow CI runner gets room
+        # past it (the macOS Intel runner once failed the 4 s this had), and
+        # a failure shows what the command said.
+        stopped = status != 0 && after !== nothing && 2.0 <= parse(Float64, after[1]) < 30.0
+        stopped || @info "pandocjl with a time limit of 2 s" status err
+        @test stopped
         status, out, _ = pandocjl_in(lab, "doc.md", "-t", "html"; env = merge(HERE, Dict("LIBPANDOC_WASM_TIMEOUT" => "10")))
         @test (status, out) == (0, "<p><em>hi</em></p>\n")
     end

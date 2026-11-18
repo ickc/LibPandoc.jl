@@ -94,7 +94,9 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
     and IO in other tasks go on meanwhile.
   - **A script** (`julia script.jl`, `-e`, `-m`; not interactive): the
     call runs on thread 1. Julia exits at once on Ctrl-C, its default for
-    a script (0.10 to 0.11 s, measured); after
+    a script (0.10 to 0.11 s, measured; Julia's exit can get stuck, as its
+    source says, and a second Ctrl-C ends the process: once on macOS in CI
+    the first was missed); after
     `Base.exit_on_sigint(false)` Ctrl-C takes effect when the call returns.
     (Not run elsewhere there: Julia's exit on Ctrl-C takes thread 1 over
     wherever it is, and with thread 1 waiting in Julia's scheduler that

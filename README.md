@@ -174,7 +174,7 @@ reader keeps in memory, such as a docx's images, reaches the writer):
   `writer_options` being Lua's `PANDOC_WRITER_OPTIONS`: `-N`,
   `--top-level-division`, ...; and the options). The order
   is pandoc's Lua filters' by default; `f => :topdown` or `f => :bottomup`
-  for another. Consecutive Julia filters share one parse of the document.
+  for another.
 - `RawFilter(f)`: `f(json, conversion)` on pandoc's JSON as it is.
 - **Julia filter scripts** (`"foo.jl"`), in this process (below).
 - **Wasm filters** (`"foo.wasm"`, or `WasmFilter(path)`), in this process.
@@ -228,14 +228,109 @@ when it lands on the same thread) waits forever: pandoc returns to the
 thread that called it, so the conversion started inside the filter waits
 for the one running the filter to return, and that one for it.
 
-What a Julia filter throws fails the conversion, and is thrown as a
-`FilterError` holding the exception and where it was thrown.
+What a filter of this process throws fails the conversion, and is thrown
+as a `FilterError` holding the exception, where it was thrown and which
+filter it was (below).
 
 Every filter but a Lua one is handed the whole document as pandoc's JSON
 and hands it back, whatever it changes: on a 9.4 MB textbook one that does
 next to nothing adds about 0.35 s (a Lua filter, given elements as it asks
 for them, 0.09 s); pandoc's own encoding and decoding of the JSON is most
-of it. Consecutive Julia filters share one exchange.
+of it. Consecutive filters of this process pay it once.
+
+## Consecutive filters
+
+pandoc hands a filter in this process the whole document as its JSON and
+reads back the one it returns: an exchange, about 0.3 s each on a 9.8 MB
+textbook, most of it pandoc decoding what comes back. **Consecutive
+filters of this process share one exchange, by default**: Julia functions
+(with their `traverse`), `RawFilter`s, Julia filter scripts (in process or
+as a subprocess), packages' filters (pandocjl's `-F Name`) and wasm
+filters (`WasmFilter`, `.wasm` paths). One of pandoc's own (a Lua filter,
+a JSON filter program, `citeproc`) ends a run. The same in `convert`,
+`read`, `write`, `pandocjl` (`-F a.jl -F b.jl`) and the directory sandbox.
+Within a run, from one filter to the next:
+
+- from a Julia filter to another: the same `Panir.Pandoc`, as it is;
+- from a Julia filter to one on JSON (a `RawFilter`, a wasm filter, a
+  script run as a subprocess): Panir writes it once;
+- from one on JSON to a Julia filter: Panir parses what it wrote, once;
+- from one on JSON to another: the JSON exactly as written, unchecked.
+
+A script that hands its filter over (`run_filter`) is the filter it hands
+over: two such scripts in a row are walked on one parse of the document. A
+wasm filter keeps its own limits and directories, and its calls into
+pandoc are as they were.
+
+On the textbook, JSON to HTML (`convert`, best and median of 7 runs, in
+seconds; a 32-thread machine, otherwise idle):
+
+| filters | one exchange (the default) | each its own |
+|---|---|---|
+| none | 2.17 / 2.18 | |
+| 1 wasm `identity` | 2.51 / 2.58 | |
+| 3 wasm `identity` | 2.60 / 2.68 | 3.22 / 3.28 |
+| 2 Julia filters doing nothing | 2.58 / 2.66 | 3.09 / 3.16 |
+| 3 Julia filters doing nothing | 2.65 / 2.66 | 3.56 / 3.63 |
+| 2 Julia scripts doing nothing | 2.57 / 2.60 | 3.07 / 3.14 |
+| 3 Julia scripts doing nothing | 2.59 / 2.65 | 3.57 / 3.59 |
+
+**The switch:** `separate_filters = true` (the option `"separate-filters"`)
+makes every filter its own exchange, Julia filters in a row too, so that
+pandoc reads and checks the document between any two. It is this
+package's option, not pandoc's: taken out of the options before pandoc
+sees them, and not among those filters are told. A value that isn't
+`true` or `false` is a `PandocError` of kind `"PandocOptionError"`;
+`read_many` takes it and ignores it. When the options don't say, it is
+`\$LIBPANDOC_SEPARATE_FILTERS`, read for a call with filters: `1` on;
+unset, empty or `0` off; anything else an error (an `ErrorException`, as
+for a bad `\$LIBPANDOC_WASM_TIMEOUT`), `LIBPANDOC_SEPARATE_FILTERS: 1 (each
+filter its own exchange with pandoc), or 0 or empty, not "yes"` (a safety
+switch is not to be ignored). `pandocjl` obeys the variable (a bad value:
+that message, exit status 1).
+
+**The safety side.** In a run, pandoc doesn't read the document between
+two filters: a later filter is given exactly what the earlier one left,
+and after one on JSON, its JSON. pandoc always checks the final document.
+The switch is for finding which filter broke a document, and for not
+letting one filter's JSON reach the next unchecked.
+
+What changes for a filter's author, against the same filters apart (each
+seen in this package's tests or by hand):
+
+- The next filter gets what the one before left, not the document pandoc
+  read and wrote again: the same `Panir.Pandoc`, which a filter that keeps
+  it sees changed by later filters of the run. A document nested deeper
+  than Panir reads (5,000 block quotes: JSON 2,048 levels deep) reaches
+  the next filter, which may undo it, where apart that one fails to parse
+  it. After a filter on JSON, the next is given its JSON as it is (a
+  `String`, whatever the filter returned).
+- A `RawFilter` after a Julia filter reads what Panir wrote, not pandoc:
+  the same document (byte for byte pandoc's, on the documents tried).
+- A document pandoc would refuse is refused when the run ends, not after
+  the filter that made it (or a filter of the run that can't read it
+  fails first, below).
+- pandoc's log (`pandocjl --verbose`) counts a run as one filter: one
+  `Running filter libpandoc:callback/0` for it.
+- State behaves the same either way: the same process and, in a run, the
+  same document; a script is loaded once per process either way.
+- A failing filter fails the run, and those after it don't run. It is
+  thrown as a `FilterError` naming it by its place in the `filters` given,
+  counted from 1 (Python's and Rust's count from 0; in `pandocjl`, its
+  place in pandoc's list of filters, `-F`, `-L` and `--citeproc` in
+  order): its `filter`, and in its message `filters[3]: a filter failed:
+  ...`, or `filters[3]: what it was given could not be read: ...` (its
+  `input` true) when Panir could not parse its input. When that went
+  unchecked from a filter on JSON before it, its `input_from` says whose it
+  was, and the message too: `(its input is what filters[2] wrote,
+  unchecked: LIBPANDOC_SEPARATE_FILTERS=1 has pandoc check it)`. pandoc's
+  own message (`Error running filter 'callback 0'`) names the run and
+  carries the same text. A time limit's or a cancel's `PandocError` is
+  thrown as it is, not named.
+- Cancelling: between two filters of a run, the call's `CancelToken` (or
+  Ctrl-C's) is looked at, and a cancelled one stops the run before the
+  next (a `PandocError` of kind `"Cancelled"`). A `timeout` is not: a run
+  goes to its end, as one filter does, and the call fails then.
 
 ## pandocjl
 

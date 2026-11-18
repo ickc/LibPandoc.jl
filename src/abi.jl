@@ -181,20 +181,41 @@ end
 const _ENTRY = Ref{Ptr{Cvoid}}(C_NULL)
 
 """
-    FilterError(exception, backtrace)
+    FilterError(exception, backtrace, filter, input_from, input)
 
-Thrown when a Julia filter threw in a conversion that failed because of it:
-the filter's exception, and where it was thrown. `showerror` shows both.
+Thrown when a filter of this process (a Julia function, a `RawFilter`, a
+script, a wasm filter) threw in a conversion that failed because of it:
+the filter's exception, and where it was thrown. `filter` is its place in
+the `filters` given (from 1); `input` is true when it failed before it ran,
+on what it was given, which Panir could not parse; `input_from`, when what it
+failed on went unchecked from a filter on pandoc's JSON before it in the
+same exchange with pandoc, that filter's place. `showerror` shows them all:
+`filters[3]: a filter failed: ...`, and `(its input is what filters[2]
+wrote, unchecked: LIBPANDOC_SEPARATE_FILTERS=1 has pandoc check it)`.
 """
 struct FilterError <: Exception
     exception::Any
     backtrace::Any
+    filter::Union{Nothing, Int}
+    input_from::Union{Nothing, Int}
+    input::Bool
 end
 
+FilterError(exception, backtrace) = FilterError(exception, backtrace, nothing, nothing, false)
+
 function Base.showerror(io::IO, e::FilterError)
-    print(io, "a filter failed: ")
-    showerror(io, e.exception, e.backtrace)
+    e.filter === nothing || print(io, "filters[", e.filter, "]: ")
+    print(io, e.input ? "what it was given could not be read" : "a filter failed")
+    e.input_from === nothing ||
+        print(io, " (its input is what filters[", e.input_from, "] wrote, unchecked: ",
+              SEPARATE_VAR, "=1 has pandoc check it)")
+    print(io, ": ")
+    e.backtrace === nothing ? showerror(io, e.exception) : showerror(io, e.exception, e.backtrace)
 end
+
+# (pandoc's message for it: without the backtrace, which the call's
+# FilterError has)
+_message(e::FilterError) = invoke(_message, Tuple{Any}, FilterError(e.exception, nothing, e.filter, e.input_from, e.input))
 
 # Call `f(filters::Vector{_Filter})` with the callbacks as libpandoc filters,
 # alive meanwhile; a callback's exception is thrown after pandoc returns.
@@ -215,10 +236,11 @@ function _with_callbacks(f, cbs::Vector{_Callback})
     r
 end
 
-# What a filter threw, as the call throws it: a FilterError, but a time
-# limit's PandocError as it is (a script stopped as pandoc stops a JSON
-# filter), and a cancel's (a call the filter made, stopped with its conversion).
-_filter_error(e, bt) = istimeout(e) || iscancelled(e) ? e : FilterError(e, bt)
+# What a filter threw, as the call throws it: a FilterError (a run's,
+# naming the filter, as it is), but a time limit's PandocError as it is (a
+# script stopped as pandoc stops a JSON filter), and a cancel's (a call the
+# filter made, stopped with its conversion, or a run stopped between two).
+_filter_error(e, bt) = e isa FilterError || istimeout(e) || iscancelled(e) ? e : FilterError(e, bt)
 
 # -- the calls -------------------------------------------------------------------------
 

@@ -560,10 +560,11 @@ end
 # `convert` in the sandbox: the options as they are but for "sandbox", the
 # filters of this process called back; stopped from outside when `token` is
 # cancelled.
-function _sandboxed_convert(opts, input, dirs::_Dirs, token = nothing)
+function _sandboxed_convert(opts, input, dirs::_Dirs, token = nothing; separate::Bool = false)
     m = _Mounts(dirs)
     try
-        cbs, entries = _plan(get(opts, "filters", ()), opts)
+        cbs, entries = _plan(get(opts, "filters", ()), opts; separate)
+        _told!(cbs, token)
         o = Dict{String, Any}(k => v for (k, v) in opts if k != "sandbox")
         isempty(cbs) || (o["filters"] = entries)
         _sandbox_take(_sandbox_run(m, dirs, (:options, _json(o)), _bytes(input), cbs, token), m)

@@ -1,5 +1,5 @@
-# Cancelling calls: CancelToken (libpandoc 1.13's cancel tokens), and
-# Ctrl-C.
+# Cancelling calls: CancelToken (libpandoc 1.13's cancel tokens; with
+# untrusted options inside "untrusted", 1.14), and Ctrl-C.
 #
 # Thread 1 runs the main task (a script's, the REPL's) and libuv's loop,
 # which wakes every task's timers, sleeps and IO; Julia throws Ctrl-C as an
@@ -42,7 +42,10 @@ pandoc runs, and in the directory sandbox the whole of pandoc, Lua included
 (the module is stopped from outside, by wasmtime's epoch); not a Julia
 filter running (it runs to its end, and the call then fails), nor Lua
 outside the sandbox. A call that finished before the cancel keeps its
-result. `untrusted` options take none (libpandoc's rule).
+result. With `untrusted = true` the token goes inside the key this host
+writes, `"untrusted": {"cancel-token": N}` (libpandoc 1.14), not beside it
+(a top-level `"cancel-token"` with `"untrusted"` is refused: the code could
+have written it).
 
 ```julia
 token = CancelToken()
@@ -78,8 +81,13 @@ Stop every call using `token`, running or to come. From any task or thread
 (not a raw signal handler's C code).
 """
 function cancel!(t::CancelToken)
+    # pandoc first, then the flag: once `iscancelled` says so, pandoc knows (a
+    # filter that sees it and returns can't let a short conversion end well);
+    # the flag before the epoch advances, which has the directory sandbox look
+    # at it. (pandoc_cancel may wait for the runtime: GC-safe meanwhile.)
+    id = t.id
+    id > 0 && @ccall gc_safe = true $(_load().cancel)(id::Int64)::Cint
     @atomic t.cancelled = true
-    t.id > 0 && ccall(_load().cancel, Cint, (Int64,), t.id)
     _interrupt()
     nothing
 end
@@ -90,7 +98,9 @@ end
 
 Whether `cancel!(token)` was called; whether `e` is a `PandocError` of a
 call stopped by its token (kind `"Cancelled"`), as libpandoc-rs's
-`is_cancelled`.
+`is_cancelled`. Once `iscancelled(token)` is true, every call using the
+token fails as cancelled: a filter that sees it and returns can rely on its
+conversion failing so.
 """
 iscancelled(t::CancelToken) = @atomic t.cancelled
 iscancelled(e) = e isa PandocError && e.kind == "Cancelled"
@@ -105,12 +115,19 @@ end
 
 const _CANCELLED = "the call was cancelled"
 
-# The options with libpandoc's "cancel-token" for `t`. Not "untrusted" ones
-# with Ctrl-C's own token: libpandoc takes no token in options from code it
-# doesn't trust (a token given with them is its error).
-function _with_token(opts, t, own::Bool)
+# The options with libpandoc's "cancel-token" for `t`; for untrusted ones,
+# inside the key the host writes: "untrusted": {"cancel-token": N}
+# (libpandoc 1.14), as a top-level one beside "untrusted" is refused (the
+# code could have written it). `true` and an object take it so; any other
+# value of "untrusted" is left as it is, beside a top-level token, for
+# libpandoc to refuse (never taken for trusted).
+function _with_token(opts, t)
     t === nothing && return opts
-    own && get(opts, "untrusted", false) == true && return opts
+    u = get(opts, "untrusted", false)
+    if u === true || u isa AbstractDict
+        own = u === true ? Dict{String, Any}() : Dict{String, Any}(String(k) => v for (k, v) in u)
+        return merge(opts, Dict{String, Any}("untrusted" => merge(own, Dict{String, Any}("cancel-token" => t.id))))
+    end
     merge(opts, Dict{String, Any}("cancel-token" => t.id))
 end
 
@@ -137,16 +154,16 @@ function _on_exit()
 end
 
 """
-`f(token, own)`, a call into pandoc, stopped by `cancel` (a CancelToken or
+`f(token)`, a call into pandoc, stopped by `cancel` (a CancelToken or
 nothing) and, in the REPL on an interactive thread 1, by Ctrl-C:
-there it runs in the default pool, with a token of its own if not given one
-(`own`), while this task waits.
+there it runs in the default pool, with a token of its own if not given one,
+while this task waits.
 """
 function _interruptible(f, cancel)
     cancel === nothing || cancel isa CancelToken ||
         throw(ArgumentError("cancel: a CancelToken, not $(repr(cancel))"))
     cancel !== nothing && iscancelled(cancel) && throw(PandocError("Cancelled", _CANCELLED))
-    _elsewhere() || return f(cancel, false)
+    _elsewhere() || return f(cancel)
     own = cancel === nothing
     t = own ? CancelToken() : cancel
     result, failed = Ref{Any}(nothing), Ref{Any}(nothing)
@@ -159,7 +176,7 @@ function _interruptible(f, cancel)
     awake = Timer(0.05; interval = 0.05)
     @lock _AWAY_LOCK push!(_AWAY, t)
     task = Threads.@spawn try
-        result[] = f(t, own)
+        result[] = f(t)
     catch e
         failed[] = e
     finally

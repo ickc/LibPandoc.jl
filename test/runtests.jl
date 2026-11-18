@@ -349,7 +349,7 @@ end
 @testset "versions" begin
     # the same major, a minor at least the one relied on
     v = 1000P.ABI_MAJOR + P.ABI_MINOR
-    @test P.ABI_MINOR >= 13 && P._abi_ok(v) && P._abi_ok(v + 1)
+    @test P.ABI_MINOR >= 14 && P._abi_ok(v) && P._abi_ok(v + 1)
     @test !P._abi_ok(v - 1) && !P._abi_ok(v + 1000)
     e = try P._abi_check(1007, "old/libpandoc.so") catch e; e end
     @test e isa ErrorException && contains(e.msg, "ABI 1.7") && contains(e.msg, "needs 1.$(P.ABI_MINOR)")
@@ -548,6 +548,28 @@ end
             Dict("query" => ["parse-args", Dict("args" => ["-d", "x.yaml"])])])
         @test all(r -> r["error"][1] == "PandocOptionError", refused)
         @test contains(refused[1]["error"][2], "not allowed for untrusted code: filters")
+        # a filter can't name a cancel token: "untrusted" is written over what
+        # it wrote (its calls stop with the conversion they run in), and one
+        # beside it is refused
+        t = CancelToken()
+        cancel!(t)
+        a = calls([Dict("convert" => [Dict("to" => "html", "untrusted" => Dict("cancel-token" => t.id)), "*x*"]),
+                   Dict("convert" => [Dict("to" => "html", "cancel-token" => t.id), "*x*"]),
+                   Dict("read_many" => [["x"], Dict("untrusted" => Dict("cancel-token" => t.id))])])
+        @test a[1] == Dict("ok" => "<p><em>x</em></p>\n")
+        @test a[2]["error"][1] == "PandocOptionError"
+        @test length(a[3]["ok"]) == 1
+        # its calls may give citeproc its files as their contents (libpandoc
+        # 1.14's "citeproc-files"), and read none themselves
+        mktempdir() do d
+            Base.write(joinpath(d, "refs.bib"), "@book{key, title={CANARY-ON-DISK}, author={B}, year={2001}}\n")
+            bib = Dict("refs.bib" => "@book{key, title={BIB-OK}, author={A}, year={2000}}\n")
+            doc = "---\nbibliography: refs.bib\n---\n\n[@key]\n"
+            a = cd(() -> calls([Dict("convert" => [Dict("to" => "plain", "citeproc" => true, "citeproc-files" => bib), doc]),
+                                Dict("convert" => [Dict("to" => "plain", "citeproc" => true), doc])]), d)
+            @test contains(a[1]["ok"], "BIB-OK")
+            @test haskey(a[2], "error") && !contains(JSON.json(a), "CANARY")
+        end
         # sandboxed: LaTeX's \input reads no file
         mktempdir() do d
             secret = joinpath(d, "secret.tex")
@@ -727,6 +749,46 @@ end
         out = JSON.parse(P.convert("```call\n$(JSON.json(request))\n```"; to = "json",
                                    filters = [WasmFilter(wasm("calls"); timeout = 30)]))
         @test JSON.parse(out["blocks"][1]["c"][2])["error"][1] == "Timeout"
+        # citeproc in a wasm filter (libpandoc-rs's example `citeproc`): it
+        # reads the files the metadata names in the directories it is given and
+        # hands pandoc their contents. Without them they are missing, and a
+        # canary outside them never shows, however the conversion is
+        # sandboxed (not, pandoc's `--sandbox`, the directory sandbox listing
+        # the canary's directory). With pandocjl, whose standard error has
+        # pandoc's message.
+        mktempdir() do base
+            base = realpath(base)
+            work, secret = mkpath(joinpath(base, "work")), mkpath(joinpath(base, "secret"))
+            Base.write(joinpath(work, "refs.bib"), "@article{key, title={BIB-OK}, journal={Journal of Long Names}, " *
+                                                   "author={Author, A.}, year={2000}}\n")
+            Base.write(joinpath(work, "style.csl"), """
+                <?xml version="1.0" encoding="utf-8"?>
+                <style xmlns="http://purl.org/net/xbiblio/csl" class="in-text" version="1.0">
+                  <info><title>Test</title><id>test</id><updated>2026-01-01T00:00:00+00:00</updated></info>
+                  <citation><layout><text value="STYLE-OK "/><text variable="title"/><text value=" in "/><text variable="container-title" form="short"/></layout></citation>
+                </style>
+                """)
+            Base.write(joinpath(work, "abbr.json"), """{"default": {"container-title": {"Journal of Long Names": "ABBR-OK"}}}""")
+            marker = "CANARY-WASM-CITEPROC-$(string(rand(UInt64); base = 16))"
+            Base.write(joinpath(secret, "canary.bib"), "@book{key, title={$marker}, author={B}, year={2001}}\n")
+            doc = "---\nbibliography: refs.bib\ncsl: style\ncitation-abbreviations: abbr\n---\n\n[@key]\n"
+            canary = "---\nbibliography: ../secret/canary.bib\nnocite: '@*'\n---\n\n[@key]\n"
+            cite(args, sandbox, dirs, input) =
+                withenv("LIBPANDOC_SANDBOX" => sandbox, "LIBPANDOC_SANDBOX_WRITE" => nothing, P.DIRS_VAR => dirs) do
+                    pandocjl("-t", "plain", "-F", wasm("citeproc"), args...; input, dir = work)
+                end
+            # native, pandoc's sandbox, the directory sandbox (`..`: the canary's
+            # directory too)
+            for (args, sandbox) in ((String[], nothing), (["--sandbox"], nothing), (String[], ".."))
+                status, out, err = cite(args, sandbox, ".", doc)
+                @test status == 0 && all(ok -> contains(out, ok), ("STYLE-OK", "BIB-OK", "ABBR-OK"))
+                status, out, err = cite(args, sandbox, nothing, doc)
+                @test status == 83 && contains(err, "not found") &&
+                      contains(err, "(it was given no directory: LIBPANDOC_WASM_DIRS)")
+                status, out, err = cite(args, sandbox, ".", canary)
+                @test status == 83 && !contains(out * err, marker) && contains(err, "canary.bib' not found")
+            end
+        end
     end
     # what a process's image holds of an earlier process (precompiling's, a
     # system image's) is reset: the clock thread, which runs time limits,

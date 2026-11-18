@@ -141,8 +141,11 @@ They stop what `timeout` stops.
 
 libpandoc's own options: `untrusted = true` (for options from code you
 don't trust: only those that read, write, fetch and run nothing, with
-pandoc's sandbox on), and `timeout` (seconds): a conversion still running
-after that long is stopped, a `PandocError` of kind `"Timeout"`, and the
+pandoc's sandbox on; with `cancel`, the token goes inside it),
+`citeproc_files = Dict(name => text)` (citeproc's files given as their
+contents, for a conversion in pandoc's sandbox, `sandbox = true` or
+`untrusted = true`: the README's wasm filter item), and `timeout`
+(seconds): a conversion still running after that long is stopped, a `PandocError` of kind `"Timeout"`, and the
 process goes on. It stops pandoc's own code (readers, writers, templates,
 citeproc), a JSON filter pandoc runs and a Julia script run as a
 subprocess, not code in this process or in Lua: a Julia filter (a function, a script, a wasm filter, which has its own
@@ -167,11 +170,11 @@ function convert(input = nothing, options::AbstractDict = Dict{String, Any}(); c
     _input(input, opts)
     dirs = _sandbox_of(opts)
     out = if dirs !== nothing
-        _interruptible((t, _) -> _sandboxed_convert(opts, input, dirs, t), cancel)
+        _interruptible(t -> _sandboxed_convert(opts, input, dirs, t), cancel)
     else
         cbs, entries = _plan(get(opts, "filters", ()), opts)
         isempty(cbs) || (opts = merge(opts, Dict("filters" => entries)))
-        _interruptible((t, own) -> _convert(_json(_with_token(opts, t, own)), input, cbs), cancel)
+        _interruptible(t -> _convert(_json(_with_token(opts, t)), input, cbs), cancel)
     end
     # (output-file null or "-": pandoc's standard output, which is `out`)
     get(opts, "output-file", nothing) isa AbstractString && opts["output-file"] != "-" && return ""
@@ -261,8 +264,8 @@ function read_many(texts, from::Union{Nothing, AbstractString, Conversion} = not
         throw(PandocError("PandocOptionError", "read_many: a directory sandbox is for conversions " *
                                                "(\"sandbox\": true reads no files)"))
     inputs = String[t isa AbstractVector{UInt8} ? String(copy(t)) : String(t) for t in texts]
-    out = JSON.parse(String(_interruptible(cancel) do t, own
-        _read_many(_json(Dict("options" => _with_token(opts, t, own), "inputs" => inputs)))
+    out = JSON.parse(String(_interruptible(cancel) do t
+        _read_many(_json(Dict("options" => _with_token(opts, t), "inputs" => inputs)))
     end))
     docs = Any[]
     for (i, j) in enumerate(out)

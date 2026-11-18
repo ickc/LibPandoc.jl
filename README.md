@@ -381,8 +381,9 @@ pandocjl -F other-filter input.md              # anything else: as pandoc does
 - **A wasm filter** (`-F name.wasm`): a pandoc JSON filter built for WASI
   (`wasm32-wasip1`), such as any [panir](https://github.com/ickc/panir) Rust
   filter; see [libpandoc-rs](https://github.com/ickc/libpandoc-rs). It runs
-  in wasmtime, sandboxed: no network; of the environment, only the
-  variables pandoc gives filters; and **no directory**, as a wasm filter is
+  in wasmtime, sandboxed: no network; of the environment, the variables
+  pandoc gives filters and **none of this process's** unless named (below);
+  and **no directory**, as a wasm filter is
   for code you don't trust, unless `$LIBPANDOC_WASM_DIRS` gives some:
   directories as `PATH` lists them (`:`, `;` on Windows; unset or empty:
   none), read-only, the same for every wasm filter, in the directory
@@ -413,6 +414,45 @@ pandocjl -F other-filter input.md              # anything else: as pandoc does
   link-time optimisation, and keeps it, so fails, built with `lto = true`.
   A symbolic link is refused when it leaves the directory its name is
   opened through, even into another one given.
+
+  **Environment variables** configure filters (pandoc-ext's pagebreak
+  reads `PANDOC_PAGEBREAK_HTML_CLASS` and `PANDOC_PAGEBREAK_ODT_STYLE`),
+  and they also hold tokens and passwords, which a filter run without
+  auditing it is not to have. So a wasm filter gets only those pandoc
+  gives filters (`PANDOC_VERSION`, `PANDOC_READER_OPTIONS`, and libpandoc's
+  `PANDOC_WRITER_OPTIONS`, `PANDOC_INPUT_FORMAT`, `PANDOC_OUTPUT_FORMAT`,
+  `PANDOC_SANDBOX`), unless `$LIBPANDOC_WASM_ENV` names some to give every
+  wasm filter, with this process's values: names separated by commas
+  (empty entries skipped; one the process doesn't have is left out), read
+  when the filter runs, as its directories are:
+
+  ```sh
+  LIBPANDOC_WASM_ENV=MYFILTER_STYLE,MYFILTER_LANG pandocjl -F myfilter.wasm input.md
+  ```
+
+  An entry that can't be a variable's name (with `=`, a NUL or white
+  space) fails the filter before it runs, named up to an `=` (what follows
+  may be a value): `LIBPANDOC_WASM_ENV: not a variable's name: "A B"`,
+  `... "TOKEN=..."`; so does a value that isn't UTF-8
+  (`LIBPANDOC_WASM_ENV: NAME: its value is not UTF-8`). No message ever
+  shows a value. The variables pandoc gives filters are the host's: a
+  grant of one of those names is not passed. A program gives one filter
+  its own instead, whatever the variable says: `WasmFilter(path; env =
+  ["NAME", ...])`, names whose values are this process's when the filter
+  runs, or `env = Dict("NAME" => "value")` (or a list of pairs), names
+  with values (`env = String[]`: none). A bad name there is an
+  `ArgumentError` when the filter is made (`PATH: not a variable's name:
+  "A B"`), as is a value with a NUL.
+
+  A filter can't tell a variable not set from one not given, and the host
+  can't see what a filter looks up: nothing says a filter missed one. So a
+  filter does better to read its configuration from the document's
+  metadata, which is in the document for all to see and works in every
+  host, with the environment as an override at most. All this is about
+  wasm filters only: in the directory sandbox pandoc and its Lua filters
+  get the environment the sandbox gives them, whatever
+  `LIBPANDOC_WASM_ENV` says, and Julia filters and JSON filters
+  (programs) see this process's whole environment.
 
   It may call pandoc (libpandoc-rs's `libpandoc` crate built for
   wasm): in pandoc's sandbox, with options that name no files (libpandoc

@@ -141,8 +141,11 @@ They stop what `timeout` stops.
 
 libpandoc's own options: `untrusted = true` (for options from code you
 don't trust: only those that read, write, fetch and run nothing, with
-pandoc's sandbox on), and `timeout` (seconds): a conversion still running
-after that long is stopped, a `PandocError` of kind `"Timeout"`, and the
+pandoc's sandbox on; with `cancel`, the token goes inside it),
+`citeproc_files = Dict(name => text)` (citeproc's files given as their
+contents, for a conversion in pandoc's sandbox, `sandbox = true` or
+`untrusted = true`: the README's wasm filter item), and `timeout`
+(seconds): a conversion still running after that long is stopped, a `PandocError` of kind `"Timeout"`, and the
 process goes on. It stops pandoc's own code (readers, writers, templates,
 citeproc), a JSON filter pandoc runs and a Julia script run as a
 subprocess, not code in this process or in Lua: a Julia filter (a function, a script, a wasm filter, which has its own

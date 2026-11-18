@@ -62,8 +62,12 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
   (`iscancelled(e)`, as libpandoc-rs's `is_cancelled()`; `iscancelled(token)`
   too), the process going on. It stops what `timeout` stops (in the
   directory sandbox, the whole conversion, Lua included). A token stays
-  cancelled, and serves any number of calls. `untrusted = true` options
-  take none (libpandoc's rule: a `PandocError`).
+  cancelled, and serves any number of calls. Once `iscancelled(token)` is
+  true, every call using it fails as cancelled: a filter that sees it and
+  returns can rely on that. With `untrusted = true` the token goes inside
+  the key this package writes, `"untrusted": {"cancel-token": N}`
+  (libpandoc 1.14), not beside it: a top-level `"cancel-token"` with
+  `"untrusted"` is refused, as the code could have written it.
 
   ```julia
   token = CancelToken()
@@ -118,8 +122,7 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
     compilation (minutes on a CI runner).
   - **Windows:** the same; Ctrl-C itself is not checked there (the tests
     can't send it), the token is.
-  - **Ctrl-C waits for the call to return** with `untrusted = true` (such
-    calls take no token), with `run`, and for a call made in a task on
+  - **Ctrl-C waits for the call to return** with `run`, and for a call made in a task on
     another thread (`fetch(Threads.@spawn ...)`: Ctrl-C interrupts the
     waiting, and the call goes on). `pandocjl` exits at once.
 
@@ -150,7 +153,9 @@ Pandoc.write(walk!(upper, doc), "plain")  # "HELLO WORLD\n"
 - **Untrusted options:** `untrusted = true` accepts only options that read
   no files, write none, fetch nothing and run nothing, with pandoc's
   sandbox on (libpandoc's list; anything else throws a `PandocError`
-  naming it): for options from code you don't trust. It bounds neither
+  naming it): for options from code you don't trust: citeproc with the
+  metadata's references, or with its files given as their contents
+  (`citeproc_files`, below), not a `bibliography` file. It bounds neither
   time nor memory (above).
 - **Queries:** `pandoc_version()`, `api_version()`, `input_formats()`,
   `output_formats()`, `extensions(format)`, `default_template(format)`,
@@ -314,8 +319,11 @@ pandocjl -F other-filter input.md              # anything else: as pandoc does
   It may call pandoc (libpandoc-rs's `libpandoc` crate built for
   wasm): in pandoc's sandbox, with options that name no files (libpandoc
   checks them, `"untrusted"`: the same for every host), so the calls read
-  no file, not even one the filter can read itself (citeproc takes the
-  metadata's inline `references`, not a `bibliography` file). Limits, which
+  no file, not even one the filter can read itself: for citeproc, the
+  filter reads the bibliography, style and abbreviations itself and gives
+  them as their contents (below). A filter can't name a cancel token
+  (`"untrusted"` is written over what it wrote); its calls stop with the
+  conversion they run in. Limits, which
   pandoc has for no filter: `$LIBPANDOC_WASM_TIMEOUT` (seconds, as
   pandoc-server's `--timeout`; its calls to pandoc included: each runs
   with the time the filter has left as its `"timeout"`) and
@@ -340,6 +348,31 @@ pandocjl -F other-filter input.md              # anything else: as pandoc does
   `sandbox = true` or `--sandbox`, covers its writers and citeproc, not a
   PDF engine). Then a filter from anywhere risks the
   document and the directories you listed, not your machine.
+
+  **citeproc in a wasm filter** (multibib and the like): its files are
+  read by the filter, with the access its host gave it, and given to
+  pandoc as their contents, `"citeproc-files"` (libpandoc 1.14): options
+  `{"from": "json", "to": "json", "citeproc": true, "citeproc-files":
+  {"NAME": "TEXT", ...}}`, each file under the name pandoc looks up: a
+  bibliography as the metadata names it (`refs.bib`, `../common/refs.bib`,
+  an absolute path), `csl: style` as `style.csl` and
+  `citation-abbreviations: abbr` as `abbr.json` (a name with a dot as it
+  is), TEXT the file as UTF-8 text. libpandoc-rs's `libpandoc::citeproc`
+  does it for filters in Rust (its example filter `citeproc`); a file the
+  filter can't read (outside its directories) is left out, and pandoc
+  reports it missing. libpandoc's header has the rules (a dependent
+  style's parent, LaTeX's `\bibliography`); URLs are never fetched. From
+  Julia the option is `citeproc_files = Dict(name => text)`, for a
+  conversion in pandoc's sandbox (`sandbox = true` or `untrusted = true`;
+  in the directory sandbox, `untrusted = true`; without, it is refused, as
+  citeproc would read the disk instead): a Julia filter's own citeproc
+  (`convert(...; citeproc = true)`) reads the files itself, with this
+  process's access.
+
+  A filter that reads files reads what the document asks for, within its
+  directories (an include filter; citeproc on the metadata's
+  `bibliography`): when the document isn't trusted either, give the filter
+  no more than the document's own list (`$LIBPANDOC_SANDBOX`).
 
 Filters are looked for as pandoc does: as given, then in the user data
 directory's `filters/`. Install it as a [Julia app](https://pkgdocs.julialang.org/v1/apps/):
@@ -521,7 +554,7 @@ exists, a container at least, a virtual machine better.
 
 ## Installing
 
-LibPandoc.jl needs Julia 1.12 or later, and libpandoc 1.13 or a later
+LibPandoc.jl needs Julia 1.12 or later, and libpandoc 1.14 or a later
 1.x (its ABI version, checked when the library is loaded). It finds libpandoc:
 `$LIBPANDOC_PATH` (the library), else `$LIBPANDOC_PREFIX` or
 `$CONDA_PREFIX` (a prefix with `lib/libpandoc.so`, `.dylib`, or

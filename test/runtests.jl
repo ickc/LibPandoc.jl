@@ -349,7 +349,7 @@ end
 @testset "versions" begin
     # the same major, a minor at least the one relied on
     v = 1000P.ABI_MAJOR + P.ABI_MINOR
-    @test P.ABI_MINOR >= 13 && P._abi_ok(v) && P._abi_ok(v + 1)
+    @test P.ABI_MINOR >= 14 && P._abi_ok(v) && P._abi_ok(v + 1)
     @test !P._abi_ok(v - 1) && !P._abi_ok(v + 1000)
     e = try P._abi_check(1007, "old/libpandoc.so") catch e; e end
     @test e isa ErrorException && contains(e.msg, "ABI 1.7") && contains(e.msg, "needs 1.$(P.ABI_MINOR)")
@@ -548,6 +548,17 @@ end
             Dict("query" => ["parse-args", Dict("args" => ["-d", "x.yaml"])])])
         @test all(r -> r["error"][1] == "PandocOptionError", refused)
         @test contains(refused[1]["error"][2], "not allowed for untrusted code: filters")
+        # a filter can't name a cancel token: "untrusted" is written over what
+        # it wrote (its calls stop with the conversion they run in), and one
+        # beside it is refused
+        t = CancelToken()
+        cancel!(t)
+        a = calls([Dict("convert" => [Dict("to" => "html", "untrusted" => Dict("cancel-token" => t.id)), "*x*"]),
+                   Dict("convert" => [Dict("to" => "html", "cancel-token" => t.id), "*x*"]),
+                   Dict("read_many" => [["x"], Dict("untrusted" => Dict("cancel-token" => t.id))])])
+        @test a[1] == Dict("ok" => "<p><em>x</em></p>\n")
+        @test a[2]["error"][1] == "PandocOptionError"
+        @test length(a[3]["ok"]) == 1
         # sandboxed: LaTeX's \input reads no file
         mktempdir() do d
             secret = joinpath(d, "secret.tex")

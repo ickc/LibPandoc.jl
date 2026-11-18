@@ -1,5 +1,5 @@
 # Cancelling calls (CancelToken, `cancel = token`; libpandoc 1.13's cancel
-# tokens) and Ctrl-C: before, during and after a call, from another thread,
+# tokens, inside "untrusted" for untrusted options from 1.14) and Ctrl-C: before, during and after a call, from another thread,
 # with a filter running, in the directory sandbox, and SIGINT sent to a
 # process converting a slow document.
 #
@@ -100,11 +100,41 @@ cancel_after(t, s) = Threads.@spawn (nap(s); cancel!(t))
     t = CancelToken()
     @test iscancelled(timed(() -> P.convert("x"; filters = [(d::Panir.Pandoc) -> (cancel!(t); nothing)], cancel = t))[1])
 
-    # libpandoc takes no token in options from code it doesn't trust: one
-    # given is its error; Ctrl-C's own token isn't given them
+    # untrusted options take the host's token inside "untrusted" (libpandoc
+    # 1.14): before, during, and a call that ends before it
     @test P.convert("*x*"; to = "html", untrusted = true) == "<p><em>x</em></p>\n"
-    e, _ = timed(() -> P.convert("*x*"; untrusted = true, cancel = CancelToken()))
-    @test e isa PandocError && contains(e.message, "cancel-token")
+    @test P.convert("*x*"; to = "html", untrusted = true, cancel = CancelToken()) == "<p><em>x</em></p>\n"
+    t = CancelToken()
+    cancel!(t)
+    for f in (() -> P.convert(SLOW; timeout = LIMIT, untrusted = true, cancel = t),
+              () -> P.read_many(["a", "b"]; untrusted = true, cancel = t))
+        e, took = timed(f)
+        @test iscancelled(e) && took < 1
+    end
+    for f in ((t) -> P.convert(SLOW; timeout = LIMIT, untrusted = true, cancel = t),
+              (t) -> P.read_many([SLOW, "x"]; timeout = LIMIT, untrusted = true, cancel = t))
+        t = CancelToken()
+        c = cancel_after(t, 1)
+        e, took = timed(() -> f(t))
+        wait(c)
+        @test iscancelled(e)
+        @test took < 4
+    end
+    # what the host writes: inside "untrusted" (true, or an object), over a
+    # token of the code's own; any other value left for libpandoc to refuse
+    t = CancelToken()
+    @test P._with_token(Dict{String, Any}("untrusted" => true), t)["untrusted"] == Dict("cancel-token" => t.id)
+    o = P._with_token(Dict{String, Any}("untrusted" => Dict("cancel-token" => 0)), t)
+    @test o["untrusted"] == Dict("cancel-token" => t.id) && !haskey(o, "cancel-token")
+    @test P._with_token(Dict{String, Any}("untrusted" => false), t)["cancel-token"] == t.id
+    @test P._with_token(Dict{String, Any}(), t)["cancel-token"] == t.id
+    e, _ = timed(() -> P.convert("*x*"; untrusted = 1, cancel = t))
+    @test e isa PandocError && e.kind == "PandocOptionError"
+    # a token beside "untrusted" is still refused (the code could have written it)
+    for u in (true, Dict(), Dict("cancel-token" => t.id))
+        e, _ = timed(() -> P.convert("*x*", Dict("untrusted" => u, "cancel-token" => t.id)))
+        @test e isa PandocError && e.kind == "PandocOptionError" && contains(e.message, "cancel-token")
+    end
 end
 
 @testset "cancel: the directory sandbox" begin
@@ -130,6 +160,17 @@ end
     t = CancelToken()
     cancel!(t)
     @test iscancelled(timed(() -> P.convert("x"; sandbox, cancel = t))[1])
+    # untrusted options: the token stops the module as well (it is never in
+    # the options the module gets); one beside "untrusted" is refused, as
+    # natively
+    t = CancelToken()
+    c = cancel_after(t, 1)
+    e, took = timed(() -> P.convert(SLOW; to = "html", sandbox, untrusted = true, cancel = t))
+    wait(c)
+    @test iscancelled(e) && took < 4
+    @test P.convert("*x*"; to = "html", sandbox, untrusted = true, cancel = CancelToken()) == "<p><em>x</em></p>\n"
+    e, _ = timed(() -> P.convert("x", Dict("sandbox" => sandbox, "untrusted" => true, "cancel-token" => CancelToken().id)))
+    @test e isa PandocError && e.kind == "PandocOptionError" && contains(e.message, "cancel-token")
     # cancelled once the call has begun but before the store is watched
     # (while the module loads): stopped when it is, with no time limit (no
     # clock moving the epoch after the cancel's own move)

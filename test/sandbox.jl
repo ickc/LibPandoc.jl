@@ -697,6 +697,29 @@ else
     end
 
     if !isempty(WASM)
+        @testset "the variables named reach wasm filters only" begin
+            # a wasm filter given a variable gets it in the directory sandbox
+            # too; pandoc inside, and its Lua filters, don't (a Lua filter
+            # there sees the sandbox's TMPDIR, not it)
+            Base.write(joinpath(lab.work, "env.lua"), """
+                function Pandoc(doc)
+                  doc.meta.granted = tostring(os.getenv('LIBPANDOC_TEST_GRANTED'))
+                  doc.meta.tmpdir = tostring(os.getenv('TMPDIR'))
+                  return doc
+                end
+                """)
+            withenv("LIBPANDOC_WASM_ENV" => "LIBPANDOC_TEST_GRANTED", "LIBPANDOC_TEST_GRANTED" => "granted") do
+                for (f, given) in ((wasm("conversion"), Dict("LIBPANDOC_TEST_GRANTED" => "granted")),
+                                   (WasmFilter(wasm("conversion"); env = Dict("LIBPANDOC_TEST_C" => "c")),
+                                    Dict("LIBPANDOC_TEST_C" => "c")))
+                    doc = JSON.parse(P.convert("x"; to = "json", filters = ["env.lua", f], sandbox = (read = [lab.work],)))
+                    @test doc["meta"]["granted"]["c"] == "nil" && doc["meta"]["tmpdir"]["c"] != "nil"
+                    t = JSON.parse(doc["blocks"][end]["c"][2])
+                    @test (t["sandbox"], t["test-env"]) == ("true", given)
+                end
+            end
+        end
+
         @testset "a wasm filter sees its own directories, not the mounts" begin
             # the document's list and the filters' are different lists: none
             # by default, whatever is mounted

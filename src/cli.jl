@@ -28,7 +28,9 @@ file, run in this process, inside the conversion, when they are
 - a Julia filter script: `-F foo.jl` that ends with Panir's `run_filter`
   (others run as a subprocess of this Julia, see `LibPandoc` on scripts);
 - a wasm filter: `-F foo.wasm`, run by wasmtime, seeing no directory
-  unless `\$LIBPANDOC_WASM_DIRS` gives some (see [`WasmFilter`](@ref)).
+  unless `\$LIBPANDOC_WASM_DIRS` gives some and no variable of this
+  process's environment unless `\$LIBPANDOC_WASM_ENV` names it (see
+  [`WasmFilter`](@ref)).
 
 Consecutive ones are one exchange with pandoc (one callback, one
 `Running filter libpandoc:callback/N` in pandoc's log);

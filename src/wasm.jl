@@ -5,7 +5,9 @@
 # the document on stdin, the new one on stdout, the output format as its
 # first argument, the variables libpandoc gives JSON filters in its
 # environment (PANDOC_WRITER_OPTIONS among them). It runs sandboxed: no
-# network, and only the directories it is given: by default none, as a wasm
+# network, none of this process's environment variables but those it is
+# given (WasmFilter's `env`, else those $LIBPANDOC_WASM_ENV names, read when
+# it runs), and only the directories it is given: by default none, as a wasm
 # filter is for code you don't trust. $LIBPANDOC_WASM_DIRS gives every filter
 # some, read-only: directories as PATH lists them (`:`, `;` on Windows; unset
 # or empty: none), read when the filter runs, as its limits are. A program
@@ -88,11 +90,25 @@ end
 # -- a filter ------------------------------------------------------------------------
 
 """
-    WasmFilter(path; dirs = nothing, preopens = nothing, timeout = missing, max_memory = missing)
+    WasmFilter(path; dirs = nothing, preopens = nothing, env = nothing, timeout = missing, max_memory = missing)
 
 A wasm filter: a pandoc JSON filter built for WASI (`wasm32-wasip1`), such
 as a panir Rust filter, run in this process by wasmtime, sandboxed. It
-sees no network, pandoc's filter variables, and only the directories it is
+sees no network; of the environment, the variables pandoc gives filters
+(`PANDOC_VERSION`, `PANDOC_READER_OPTIONS`, `PANDOC_WRITER_OPTIONS`,
+`PANDOC_INPUT_FORMAT`, `PANDOC_OUTPUT_FORMAT`, `PANDOC_SANDBOX`: the host's
+own, never a grant's) and only those of this process it is given: by
+default (`nothing`) those `\$LIBPANDOC_WASM_ENV` names when it runs
+(`NAME,NAME`; empty entries skipped), with this process's values then (one
+it doesn't have left out). A program gives it its own instead, whatever the
+variable says: `env = ["NAME", ...]`, names whose values are this
+process's when it runs, or `env = Dict("NAME" => "value")` (or a list of
+pairs), names with values; `env = String[]`: none. A name that can't be a
+variable's (with `=`, a NUL or white space) is an `ArgumentError` here
+(`PATH: not a variable's name: "A B"`), and in the variable an error when
+the filter runs (`LIBPANDOC_WASM_ENV: not a variable's name: "A B"`),
+showing the name up to an `=` only (`"TOKEN=..."`); no error shows a value.
+And it sees only the directories it is
 given: by default (`nothing`) those of `\$LIBPANDOC_WASM_DIRS` when it runs
 (directories as `PATH` lists them; none if unset or empty), read-only, in a
 directory sandbox too. A program gives it its own instead, whatever the
@@ -135,14 +151,17 @@ mutable struct WasmFilter
     mod::Ptr{Cvoid}
     dirs::Union{Nothing, Vector{String}}   # nothing: the variable's, when it runs
     preopens::Union{Nothing, Vector{Tuple{String, String, Bool}}}
+    # nothing: the variable's names, when it runs; names; or names with values
+    env::Union{Nothing, Vector{String}, Vector{Pair{String, String}}}
     timeout::Union{Nothing, Missing, Float64}
     max_memory::Union{Nothing, Missing, Int}
-    function WasmFilter(path::AbstractString; dirs = nothing, preopens = nothing,
+    function WasmFilter(path::AbstractString; dirs = nothing, preopens = nothing, env = nothing,
                         timeout::Union{Nothing, Missing, Real} = missing,
                         max_memory::Union{Nothing, Missing, Integer} = missing)
         # (before compiling it, which may take seconds)
         _limit("timeout", timeout; seconds = true), _limit("max_memory", max_memory; seconds = false)
         dirs, preopens = _given_dirs(dirs, preopens)
+        env = _given_env(String(path), env)
         w = _wasmtime()
         bytes = Base.read(path)
         mod = Ref{Ptr{Cvoid}}(C_NULL)
@@ -150,7 +169,7 @@ mutable struct WasmFilter
                                                      length(bytes)::Csize_t, mod::Ptr{Ptr{Cvoid}})::Ptr{Cvoid}
         _check(err, "$path: not a wasm filter")
         _version_string()  # now, not from inside a conversion
-        f = new(String(path), mod[], dirs, preopens,
+        f = new(String(path), mod[], dirs, preopens, env,
                 _limit("timeout", timeout; seconds = true), _limit("max_memory", max_memory; seconds = false))
         finalizer(f) do f
             @ccall libwasmtime.wasmtime_module_delete(f.mod::Ptr{Cvoid})::Cvoid
@@ -171,6 +190,91 @@ function _given_dirs(dirs, preopens)
         throw(ArgumentError("preopens: a list of (host, guest, writable), not $(repr(preopens))"))
     (dirs === nothing ? nothing : String[d for d in dirs],
      preopens === nothing ? nothing : Tuple{String, String, Bool}[(String(h), String(g), w) for (h, g, w) in preopens])
+end
+
+# -- the environment it sees ---------------------------------------------------------
+
+"The environment variable naming the variables of this process every wasm filter is given."
+const ENV_VAR = "LIBPANDOC_WASM_ENV"
+
+# The variables the host sets for a filter (`_filter_env`): its own, never a grant's.
+const _OWN_VARS = ("PANDOC_VERSION", "PANDOC_READER_OPTIONS", "PANDOC_WRITER_OPTIONS",
+                   "PANDOC_INPUT_FORMAT", "PANDOC_OUTPUT_FORMAT", "PANDOC_SANDBOX")
+
+# White space (Unicode's White_Space, as the other hosts take it).
+const _WHITE_SPACE = ('\t', '\n', '\v', '\f', '\r', ' ', '\u85', '\ua0', '\u1680', ('\u2000':'\u200a')...,
+                      '\u2028', '\u2029', '\u202f', '\u205f', '\u3000')
+
+# Why `name` can't be a variable's (empty, not UTF-8, or with `=`, a NUL or
+# white space), or nothing if it can. It shows the name up to an `=` only, as
+# what follows may be a value.
+function _name_error(name::AbstractString)
+    shown = if occursin('=', name)
+        first(split(name, '='; limit = 2)) * "=..."
+    elseif isempty(name) || !isvalid(name) || any(c -> c == '\0' || c in _WHITE_SPACE, name)
+        name
+    else
+        return nothing
+    end
+    "not a variable's name: $(repr(String(shown)))"
+end
+
+# WasmFilter's `env`: names (a list of strings), or names with values (a
+# Dict, or a list of pairs, of strings without a NUL), checked; never shown
+# in an error, as its values may be secrets.
+function _given_env(path::String, env)
+    env === nothing && return nothing
+    strings(x) = all(s -> s isa AbstractString, x)
+    given = if env isa AbstractVector && strings(env)
+        String[n for n in env]
+    elseif (env isa AbstractDict || env isa AbstractVector && all(p -> p isa Pair, env)) &&
+           strings(first.(collect(env))) && strings(last.(collect(env)))
+        Pair{String, String}[String(k) => String(v) for (k, v) in env]
+    else
+        throw(ArgumentError("env: a list of names, or a Dict of names and values (strings), not a $(typeof(env))"))
+    end
+    for x in given
+        name = x isa Pair ? first(x) : x
+        msg = _name_error(name)
+        msg === nothing || throw(ArgumentError("$path: $msg"))
+        x isa Pair && occursin('\0', last(x)) && throw(ArgumentError("$path: $name: its value has a NUL"))
+    end
+    given
+end
+
+# The names $LIBPANDOC_WASM_ENV gives (`NAME,NAME`, empty entries skipped).
+function _env_names()
+    names = String[n for n in split(get(ENV, ENV_VAR, ""), ',') if !isempty(n)]
+    for n in names
+        msg = _name_error(n)
+        msg === nothing || error("$ENV_VAR: $msg")
+    end
+    names
+end
+
+# The filter's environment when it runs: the host's own variables, and those
+# it is given (`env`, else $LIBPANDOC_WASM_ENV's, with this process's values
+# now; one it doesn't have left out), never in place of the host's own. An
+# error naming the variable (or the filter given the names) if a value isn't
+# UTF-8, never showing it.
+function _env(f::WasmFilter, c::Conversion)
+    given = if f.env isa Vector{Pair{String, String}}
+        f.env
+    else
+        prefix = f.env === nothing ? ENV_VAR : f.name
+        out = Pair{String, String}[]
+        for n in (f.env === nothing ? _env_names() : f.env)
+            v = get(ENV, n, nothing)
+            v === nothing && continue
+            isvalid(v) || error("$prefix: $n: its value is not UTF-8")
+            push!(out, n => v)
+        end
+        out
+    end
+    # (the last of a name kept)
+    kept = Pair{String, String}[p for (i, p) in enumerate(given)
+                                if !(first(p) in _OWN_VARS) && !any(q -> first(q) == first(p), given[i+1:end])]
+    [_filter_env(c); kept]
 end
 
 # -- the directories it sees ---------------------------------------------------------
@@ -336,7 +440,7 @@ function (f::WasmFilter)(json::Union{AbstractString, AbstractVector{UInt8}}, c::
     doc = _bytes(json)
     run = _WasmRun(something(max_memory, typemax(Int)))
     argv = [f.name, something(c.format, "")]
-    env = _filter_env(c)
+    env = _env(f, c)
     names, values = first.(env), last.(env)
     wasi = @ccall libwasmtime.wasi_config_new()::Ptr{Cvoid}
     ok = GC.@preserve argv names values begin

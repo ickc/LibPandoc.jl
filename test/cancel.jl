@@ -272,7 +272,8 @@ function interrupted(threads, exit_on_sigint, sandbox = nothing; interactive = t
     m = match(r" began (\S+)$", line)
     began = m === nothing ? nothing : tryparse(Float64, m[1])
     if began !== nothing && sent - began < 0.5 && tries > 1
-        @info "Ctrl-C: sent $(round(sent - began; digits = 2)) s after the call began (not a second): again" threads exit_on_sigint sandbox line rest stderr_said
+        gap = round(abs(sent - began); digits = 2)
+        @info "Ctrl-C: sent $gap s $(sent < began ? "before" : "after") the call began, not a second after: again" threads exit_on_sigint sandbox line rest stderr_said
         return interrupted(threads, exit_on_sigint, sandbox; interactive, slow, tries = tries - 1)
     end
     took < 4 || slow || @info "Ctrl-C took $(round(took; digits = 2)) s" threads exit_on_sigint sandbox line rest stderr_said

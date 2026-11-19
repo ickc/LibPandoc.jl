@@ -128,10 +128,28 @@ function _main(args::Vector{String}, m, dirs)
     end
     info = get(parsed, "informational", nothing)
     if info == "Help"
-        println("\nRun in process: Julia packages defining pandoc_filter (-F Name), Julia filter ",
-                "scripts (-F name.jl), wasm filters (-F name.wasm).")
+        _say(status, "\nRun in process: Julia packages defining pandoc_filter (-F Name), Julia filter " *
+                     "scripts (-F name.jl), wasm filters (-F name.wasm).")
     elseif info == "VersionInfo"
-        println("$PROG: pandoc in process, through libpandoc (LibPandoc.jl $(pkgversion(LibPandoc)), Julia $VERSION)")
+        _say(status, "$PROG: pandoc in process, through libpandoc (LibPandoc.jl $(pkgversion(LibPandoc)), Julia $VERSION)")
+    else
+        Int(status)
+    end
+end
+
+# The command's own line after pandoc's output, and the exit status: a
+# standard output closed early (`| head`) ends quietly with pandoc's, as
+# pandoc's own output does; another failure to write it (a full disk) is
+# said, status 1 (flushed here: else at exit, a finalizer's stack trace).
+function _say(status, line)
+    try
+        println(stdout, line)
+        flush(stdout)
+    catch e
+        e isa Base.IOError && e.code == Base.UV_EPIPE && return Int(status)
+        e isa Union{Base.IOError, SystemError} || rethrow()
+        println(stderr, PROG, ": ", sprint(showerror, e))
+        return 1
     end
     Int(status)
 end

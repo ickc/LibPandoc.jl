@@ -185,7 +185,9 @@ const _ENTRY = Ref{Ptr{Cvoid}}(C_NULL)
 
 Thrown when a filter of this process (a Julia function, a `RawFilter`, a
 script, a wasm filter) threw in a conversion that failed because of it:
-the filter's exception, and where it was thrown. `filter` is its place in
+the filter's exception, and where it was thrown (`nothing` for a wasm
+filter or a script run as a subprocess: its message says what failed, and
+the backtrace would be only this package's). `filter` is its place in
 the `filters` given (from 1); `input` is true when it failed before it ran,
 on what it was given, which Panir could not parse; `input_from`, when what it
 failed on went unchecked from a filter on pandoc's JSON before it in the

@@ -895,7 +895,45 @@ end
             status, _, err = pandocjl("-t", "plain", "-F", wasm("include"); input = "```include\nupper.jl\n```\n",
                                       env = Dict(P.DIRS_VAR => ""), dir = d)
             @test status == 83 && contains(err, "(it was given no directory: LIBPANDOC_WASM_DIRS)")
+            # the message says it all: no stack trace (this package's frames)
+            @test !contains(err, "Stacktrace")
+            status, _, err = pandocjl("-t", "plain", "-F", wasm("upper"); input = "x",
+                                      env = Dict(P.DIRS_VAR => joinpath(d, "nonesuch")))
+            @test status == 83 && contains(err, "does not exist") && !contains(err, "Stacktrace")
         end
+        # a script run as a subprocess: its own message, then pandocjl's, without one
+        Base.write(joinpath(d, "boomsub.jl"), "# pandocjl: subprocess\nusing Panir\nrun_filter(s::Str -> error(\"boom\"))")
+        status, _, err = pandocjl("-F", "boomsub.jl"; input = "x", dir = d)
+        last_line = last(split(chomp(err), '\n'))
+        @test status == 83 && startswith(last_line, "pandocjl: filters[1]: a filter failed: ") &&
+              endswith(last_line, "returned error status 1")
+    end
+end
+
+@testset "pandocjl: its standard output closed early, or full" begin
+    # a pipe whose reader is gone before pandocjl writes (as `| head` may
+    # leave it): pandoc's status and nothing said, as with pandoc, for
+    # pandoc's output and for pandocjl's own line after it (--version)
+    for args in (["--version"], ["-t", "html"])
+        closed = Pipe()
+        Base.link_pipe!(closed)
+        close(closed.out)
+        err = IOBuffer()
+        cmd = `$(Base.julia_cmd()) --startup-file=no --project=$PROJECT -m LibPandoc $args`
+        p = Base.run(pipeline(ignorestatus(cmd); stdin = IOBuffer("*hi*"), stdout = closed.in, stderr = err); wait = false)
+        close(closed.in)
+        timedwait(() -> process_exited(p), 300) === :ok || kill(p)
+        wait(p)
+        @test (p.exitcode, String(take!(err))) == (0, "")
+    end
+    # another failure to write its line (a full disk): said, status 1
+    if Sys.islinux()
+        err = IOBuffer()
+        cmd = `$(Base.julia_cmd()) --startup-file=no --project=$PROJECT -m LibPandoc --version`
+        p = open("/dev/full", "w") do full
+            Base.run(pipeline(ignorestatus(cmd); stdout = full, stderr = err))
+        end
+        @test (p.exitcode, String(take!(err))) == (1, "pandocjl: SystemError: flush: No space left on device\n")
     end
 end
 

@@ -62,10 +62,15 @@ end
 
 # A member of a run on pandoc's JSON: `run(json::String, context)` returns
 # the new document's (a string or bytes): a RawFilter, a wasm filter, a
-# script run as a subprocess.
+# script run as a subprocess. `trace`: whether its failure's backtrace is
+# worth keeping (a RawFilter's: its function's frames), or only this
+# package's frames under a message that says it all (a wasm filter's, a
+# subprocess's), which the FilterError then goes without.
 struct _OnJson
     run::Any
+    trace::Bool
 end
+_OnJson(run) = _OnJson(run, true)
 
 """
 One callback of libpandoc's, one exchange with pandoc: consecutive filters
@@ -114,7 +119,7 @@ function (r::_Run)(json::String, context)
             data = try
                 m.run(_text(data), context)
             catch e
-                throw(_named(e, catch_backtrace(), i, wrote))
+                throw(_named(e, m.trace ? catch_backtrace() : nothing, i, wrote))
             end
             doc, wrote = nothing, i
         end
@@ -145,7 +150,7 @@ _json_path(f) = nothing
 _walk(f, script = false) = (p = _julia_filter(f); _Walk(p.first, p.second, script))
 _on_json(r::RawFilter, @nospecialize(options)) = (user = _user_options(options);
                                                   _OnJson((json, context) -> r.f(json, _conversion(context, user))))
-_on_json(w::WasmFilter, @nospecialize(options)) = _on_json(RawFilter(w), options)
+_on_json(w::WasmFilter, @nospecialize(options)) = _OnJson(_on_json(RawFilter(w), options).run, false)
 
 """
 The callbacks for the filters that run in this process, and pandoc's

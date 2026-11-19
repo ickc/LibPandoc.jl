@@ -578,6 +578,16 @@ pkg> app add https://github.com/ickc/LibPandoc.jl   # ~/.julia/bin/pandocjl
 
 `julia -m LibPandoc ARGS` is the same command.
 
+It ends as pandoc does: pandoc's own errors with pandoc's messages and
+exit statuses; a filter of its own that fails, with status 83 and its
+message (`pandocjl: filters[2]: a filter failed: ...`), after the stack
+trace of a Julia filter's exception (the filter's, as a Julia script
+prints one), with none for a wasm filter or a script run as a subprocess
+(whose message, and what the filter wrote, say what failed). A standard
+output closed early (`pandocjl --version | head -1`) ends it quietly with
+pandoc's status, 0, as pandoc's own output does; another failure to
+write its own line (a full disk) is said, status 1.
+
 ### Start-up
 
 Julia compiles code as it first runs it. The package and Panir.jl

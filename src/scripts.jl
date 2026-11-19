@@ -127,11 +127,11 @@ function _script(path, @nospecialize(options))
         # stops a JSON filter at it, so this one too
         t = options === nothing ? nothing : get(options, "timeout", nothing)
         deadline = t isa Real && !(t isa Bool) && t > 0 ? time() + t : nothing
-        return _OnJson((json, context) -> _subprocess(path, json, context, deadline))
+        return _OnJson((json, context) -> _subprocess(path, json, context, deadline), false)
     end
     f.first isa Union{RawFilter, WasmFilter} || return _walk(f, true)
-    run = _on_json(f.first, options).run
-    _OnJson((json, context) -> _in_dir(() -> run(json, context)))
+    m = _on_json(f.first, options)
+    _OnJson((json, context) -> _in_dir(() -> m.run(json, context)), m.trace)
 end
 
 """

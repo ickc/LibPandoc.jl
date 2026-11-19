@@ -202,7 +202,8 @@ end
 # loaded and its call compiled before. The arrangement is an interactive
 # session's (`-i`) with an interactive thread (`julia`'s default since
 # 1.12, `--threads=2`). POSIX only (on Windows, `kill(p, SIGINT)` is no
-# Ctrl-C).
+# Ctrl-C). The line ends with when the call began (`time()`), for the
+# parent to see that its signal was for a call that was running.
 const CTRL_C = """
     import LibPandoc
     Base.exit_on_sigint(EXIT)
@@ -212,7 +213,7 @@ const CTRL_C = """
     try
         LibPandoc.convert($(repr(SLOW)); to = "html", timeout = 8, sandbox = SANDBOX)
     catch e
-        println("caught ", typeof(e), " ", round(time() - t0; digits = 2)); flush(stdout)
+        println("caught ", typeof(e), " ", round(time() - t0; digits = 2), " began ", t0); flush(stdout)
     end
     println(LibPandoc.convert("*x*"; to = "html"))
     """
@@ -236,14 +237,25 @@ function ctrl_c(p; exits = false)
 end
 
 # (process, the line after "started", the rest, seconds from the signal to that line)
-function interrupted(threads, exit_on_sigint, sandbox = nothing; interactive = true, slow = false)
+#
+# The signal is sent a second after "started", for a call that is running.
+# When the line says the call began less than half a second before the
+# signal, or after it, the run tested nothing and is made again (`tries`
+# in all). Seen once on macOS in CI: the child reached its call a second
+# after "started", within 15 ms of the signal, and no InterruptException
+# came, before the call (the script went on) or during it (it ran to its
+# time limit, its caller awake every 50 ms). Nothing of this package runs
+# between "started" and the call. What the child wrote to standard error
+# is kept for such a run and for a slow one (Julia reports an exception
+# caught in a finalizer there, one place an interrupt can end).
+function interrupted(threads, exit_on_sigint, sandbox = nothing; interactive = true, slow = false, tries = 3)
     code = replace(CTRL_C, "EXIT" => repr(exit_on_sigint), "SANDBOX" => repr(sandbox))
     flag = threads === nothing ? `` : `--threads=$threads`
     i = interactive ? `-i --banner=no` : ``
     cmd = `$(Base.julia_cmd()) --startup-file=no $flag $i --project=$PROJECT -e $code`
-    out = Pipe()
+    out, err = Pipe(), tempname()
     p = withenv("JULIA_NUM_THREADS" => nothing) do
-        Base.run(pipeline(cmd; stdin = devnull, stdout = out, stderr = devnull); wait = false)
+        Base.run(pipeline(cmd; stdin = devnull, stdout = out, stderr = err); wait = false)
     end
     close(out.in)
     @test readline(out) == "started"
@@ -255,7 +267,16 @@ function interrupted(threads, exit_on_sigint, sandbox = nothing; interactive = t
     took = time() - sent
     rest = Base.read(out, String)
     wait(p)
-    took < 4 || slow || @info "Ctrl-C took $(round(took; digits = 2)) s" threads exit_on_sigint sandbox line rest
+    stderr_said = isfile(err) ? Base.read(err, String) : ""
+    rm(err; force = true)
+    m = match(r" began (\S+)$", line)
+    began = m === nothing ? nothing : tryparse(Float64, m[1])
+    if began !== nothing && sent - began < 0.5 && tries > 1
+        gap = round(abs(sent - began); digits = 2)
+        @info "Ctrl-C: sent $gap s $(sent < began ? "before" : "after") the call began, not a second after: again" threads exit_on_sigint sandbox line rest stderr_said
+        return interrupted(threads, exit_on_sigint, sandbox; interactive, slow, tries = tries - 1)
+    end
+    took < 4 || slow || @info "Ctrl-C took $(round(took; digits = 2)) s" threads exit_on_sigint sandbox line rest stderr_said
     p, line, rest, took
 end
 

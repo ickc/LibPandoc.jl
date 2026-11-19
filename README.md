@@ -242,9 +242,10 @@ of it. Consecutive filters of this process pay it once.
 ## The include step: panclude
 
 [panclude](https://github.com/ickc/panclude)'s `include` attribute is
-built into libpandoc (1.15): a code block, raw block or div naming a file
-is filled with it inside the conversion, so that every filter after the
-step sees the content as if the document held it. It is off unless named
+built into libpandoc: a code block or div naming a file gets the file's
+content inside the conversion, after what it holds itself (from 1.16;
+1.15 replaced it), so that every filter after the step sees the content
+as if the document held it. It is off unless named
 among the filters: `filters = ["panclude", ...]`, or `pandocjl -F
 panclude`; first, before the filters that are to see the content.
 
@@ -759,7 +760,7 @@ exists, a container at least, a virtual machine better.
 
 ## Installing
 
-LibPandoc.jl needs Julia 1.12 or later, and libpandoc 1.15 or a later
+LibPandoc.jl needs Julia 1.12 or later, and libpandoc 1.16 or a later
 1.x (its ABI version, checked when the library is loaded). It finds libpandoc:
 `$LIBPANDOC_PATH` (the library), else `$LIBPANDOC_PREFIX` or
 `$CONDA_PREFIX` (a prefix with `lib/libpandoc.so`, `.dylib`, or

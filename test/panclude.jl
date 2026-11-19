@@ -9,15 +9,15 @@
 # Windows) a link inside it that leads out
 const PANCLUDE_DOC = """
     ```{include="part.txt"}
-    PLACEHOLDER-PART
+    OWN-PART
     ```
 
     ```{include="../secret.txt"}
-    PLACEHOLDER-OUT
+    OWN-OUT
     ```
 
     ```{include="link.txt"}
-    PLACEHOLDER-LINK
+    OWN-LINK
     ```
     """
 const NO_ROOTS = "there are no roots, so no file is included"
@@ -62,23 +62,23 @@ cannot(path, file, reason) = "[ScriptingWarning] Scripting warning: panclude: ca
         doc = joinpath(base, "doc", "doc.md")
         # by default the document's directory
         out, said = doc_plain(base, ["panclude"])
-        @test contains(out, "hello *from the part*") && contains(out, "PLACEHOLDER-OUT")
+        @test contains(out, "hello *from the part*") && contains(out, "OWN-OUT")
         @test cannot("../secret.txt", doc, "outside the roots") in said
         if !Sys.iswindows()
-            @test contains(out, "PLACEHOLDER-LINK")
+            @test contains(out, "OWN-LINK")
             @test cannot("link.txt", doc, "a symbolic link leads outside the roots") in said
         end
         # off unless named
         out, said = doc_plain(base, [])
-        @test contains(out, "PLACEHOLDER-PART") && isempty(said)
+        @test contains(out, "OWN-PART") && !contains(out, "hello") && isempty(said)
         # roots given
         other = joinpath(base, "other")
         out, said = doc_plain(base, [Dict("type" => "panclude", "roots" => [other])])
-        @test contains(out, "PLACEHOLDER-PART") && cannot("part.txt", doc, "outside the roots") in said
+        @test contains(out, "OWN-PART") && !contains(out, "hello") && cannot("part.txt", doc, "outside the roots") in said
         out, _ = doc_plain(base, [Dict("type" => "panclude", "roots" => [joinpath(base, "doc"), other])])
         @test contains(out, "hello *from the part*")
         out, said = doc_plain(base, [Dict("type" => "panclude", "roots" => String[])])
-        @test contains(out, "PLACEHOLDER-PART") && cannot("part.txt", doc, NO_ROOTS) in said
+        @test contains(out, "OWN-PART") && !contains(out, "hello") && cannot("part.txt", doc, NO_ROOTS) in said
         for bad in (Dict("type" => "panclude", "roots" => [joinpath(base, "secret.txt")]),
                     Dict("type" => "panclude", "root" => [other]))
             e = refused_with(() -> doc_plain(base, [bad]))
@@ -86,7 +86,7 @@ cannot(path, file, reason) = "[ScriptingWarning] Scripting warning: panclude: ca
         end
         # pandoc's sandbox: only roots named
         out, said = doc_plain(base, ["panclude"]; sandbox = true)
-        @test contains(out, "PLACEHOLDER-PART") && cannot("part.txt", doc, NO_ROOTS) in said
+        @test contains(out, "OWN-PART") && !contains(out, "hello") && cannot("part.txt", doc, NO_ROOTS) in said
         out, said = doc_plain(base, [Dict("type" => "panclude", "roots" => [joinpath(base, "doc")])]; sandbox = true)
         @test contains(out, "hello *from the part*") && cannot("../secret.txt", doc, "outside the roots") in said
         # one of pandoc's own: it ends a run of Julia filters
@@ -99,11 +99,11 @@ end
 
 @testset "panclude: untrusted options read only the host's roots" begin
     panclude_tree() do base
-        text = "```{include=\"$(native(joinpath(base, "doc", "part.txt")))\"}\nPLACEHOLDER-PART\n```\n"
+        text = "```{include=\"$(native(joinpath(base, "doc", "part.txt")))\"}\nOWN-PART\n```\n"
         roots = [joinpath(base, "doc")]
         untrusted(host; kw...) = warned(() -> P.convert(text; to = "plain", filters = ["panclude"], untrusted = host, kw...))
         out, said = untrusted(true)
-        @test contains(out, "PLACEHOLDER-PART") && endswith(said[1], NO_ROOTS)
+        @test contains(out, "OWN-PART") && !contains(out, "hello") && endswith(said[1], NO_ROOTS)
         # the host's roots, also beside a cancel token, and from another thread
         host = Dict("panclude-roots" => roots)
         @test contains(first(untrusted(host)), "hello *from the part*")
@@ -137,7 +137,7 @@ end
         @test status == 0 && contains(out, "hello *from the part*")
         @test contains(err, "panclude: cannot include \"../secret.txt\" in doc.md: outside the roots")
         status, out, err = pandocjl("doc.md", "-t", "plain", "--sandbox", "-F", "panclude"; dir = work)
-        @test status == 0 && contains(out, "PLACEHOLDER-PART") && contains(err, NO_ROOTS)
+        @test status == 0 && contains(out, "OWN-PART") && !contains(out, "hello") && contains(err, NO_ROOTS)
         @test !isfile(joinpath(work, "ran.txt")) && !contains(out * err, "CANARY")
     end
 end
@@ -149,16 +149,16 @@ end
         panclude_tree() do base
             # the step first, then parse (the block's text read as the
             # document was) and upper (upper-cased): they see the file's
-            # text; without the step, never
-            Base.write(joinpath(base, "doc", "doc.md"), "```{.parse include=\"part.txt\"}\nplaceholder\n```\n")
+            # text, after the block's own; without the step, never
+            Base.write(joinpath(base, "doc", "doc.md"), "```{.parse include=\"part.txt\"}\nbefore the part:\n```\n")
             after = [wasm("parse"), wasm("upper")]
-            @test first(doc_plain(base, ["panclude"; after])) == "HELLO FROM THE PART\n"
-            @test first(doc_plain(base, after)) == "PLACEHOLDER\n"
+            @test first(doc_plain(base, ["panclude"; after])) == "BEFORE THE PART: HELLO FROM THE PART\n"
+            @test first(doc_plain(base, after)) == "BEFORE THE PART:\n"
             roots = Dict("type" => "panclude", "roots" => [joinpath(base, "doc")])
-            @test first(doc_plain(base, Any[roots, after...]; sandbox = true)) == "HELLO FROM THE PART\n"
+            @test first(doc_plain(base, Any[roots, after...]; sandbox = true)) == "BEFORE THE PART: HELLO FROM THE PART\n"
             status, out, err = pandocjl("doc.md", "-t", "plain", "-F", "panclude", "-F", wasm("parse"),
                                         "-F", wasm("upper"); dir = joinpath(base, "doc"))
-            @test (status, out) == (0, "HELLO FROM THE PART\n")
+            @test (status, out) == (0, "BEFORE THE PART: HELLO FROM THE PART\n")
         end
     end
 end
@@ -177,7 +177,7 @@ end
                 # (paths natively, and as the module sees them)
                 path = sandboxed ? named : native
                 secret, root = path(joinpath(base, "secret.txt")), path(base)
-                part = "```{include=\"$secret\"}\nPLACEHOLDER\n```\n"
+                part = "```{include=\"$secret\"}\nOWN\n```\n"
                 requests = [
                     Dict("convert" => [Dict("to" => "plain", "filters" => ["panclude"]), part]),
                     Dict("convert" => [Dict("to" => "plain", "filters" => ["panclude"],
@@ -194,7 +194,7 @@ end
                 out = P.convert(; to = "json", filters = [step, wasm("calls")], options...)
                 @test !contains(out, "CANARY")
                 answers = [JSON.parse(b["c"][2]) for b in JSON.parse(out)["blocks"]]
-                @test all(a -> strip(get(a, "ok", "")) == "PLACEHOLDER", answers[1:3])
+                @test all(a -> strip(get(a, "ok", "")) == "OWN", answers[1:3])
                 @test all(a -> get(a, "error", [""])[1] == "PandocOptionError", answers[4:end])
             end
         end
@@ -207,25 +207,25 @@ end
         # /c/...); a root wider than the mounts is no directory there
         work = joinpath(base, "doc")
         secret = named(joinpath(base, "secret.txt"))
-        Base.write(joinpath(work, "doc.md"), "```{include=\"$secret\"}\nPLACEHOLDER-ABS\n```\n\n$PANCLUDE_DOC")
+        Base.write(joinpath(work, "doc.md"), "```{include=\"$secret\"}\nOWN-ABS\n```\n\n$PANCLUDE_DOC")
         file = named(joinpath(work, "doc.md"))
         mounts = (read = [work],)
         for filters in (["panclude"], [Dict("type" => "panclude", "roots" => [named(work)])])
             out, said = warned(() -> P.convert(; input_files = [file], to = "plain", filters, sandbox = mounts))
-            @test contains(out, "hello *from the part*") && contains(out, "PLACEHOLDER-ABS") && contains(out, "PLACEHOLDER-OUT")
+            @test contains(out, "hello *from the part*") && contains(out, "OWN-ABS") && contains(out, "OWN-OUT")
             @test cannot("../secret.txt", file, "outside the roots") in said
-            Sys.iswindows() || @test contains(out, "PLACEHOLDER-LINK")
+            Sys.iswindows() || @test contains(out, "OWN-LINK")
         end
         e = refused_with(() -> P.convert(; input_files = [file], to = "plain", sandbox = mounts,
                                          filters = [Dict("type" => "panclude", "roots" => [named(base)])]))
         @test e isa PandocError && e.kind == "PandocOptionError" && contains(e.message, "is not a directory")
         # untrusted, with the host's roots as the module names them
-        text = "```{include=\"$(named(joinpath(work, "part.txt")))\"}\nPLACEHOLDER-PART\n```\n"
+        text = "```{include=\"$(named(joinpath(work, "part.txt")))\"}\nOWN-PART\n```\n"
         out = P.convert(text; to = "plain", filters = ["panclude"], sandbox = mounts,
                         untrusted = Dict("panclude-roots" => [named(work)]))
         @test contains(out, "hello *from the part*")
         out, _ = warned(() -> P.convert(text; to = "plain", filters = ["panclude"], sandbox = mounts, untrusted = true))
-        @test contains(out, "PLACEHOLDER-PART")
+        @test contains(out, "OWN-PART") && !contains(out, "hello")
         # pandocjl, the working directory mounted
         status, out, err = pandocjl("doc.md", "-t", "plain", "-F", "panclude"; dir = work,
                                     env = Dict("LIBPANDOC_SANDBOX" => ".", "LIBPANDOC_WASM_TIMEOUT" => "120"))

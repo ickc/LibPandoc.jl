@@ -129,8 +129,10 @@ keywords with `_` for `-` (`reference_doc = "ref.docx"`) or as a `Dict`
 formats, bytes for binary ones (docx, pdf, ...), and `""` when
 `output_file` names a file.
 
-`filters` may mix pandoc's (Lua or JSON filter paths, `"citeproc"`) with
-Julia ones, in order, all inside the one pandoc run (see [`LibPandoc`](@ref)).
+`filters` may mix pandoc's (Lua or JSON filter paths, `"citeproc"`, the
+include step `"panclude"` or `Dict("type" => "panclude", "roots" => [...])`:
+the README's "The include step") with Julia ones, in order, all inside the
+one pandoc run (see [`LibPandoc`](@ref)).
 Consecutive filters of this process (Julia functions, `RawFilter`s, Julia
 scripts, wasm filters) are one exchange with pandoc; `separate_filters =
 true` (this package's option, not pandoc's; by default
@@ -147,7 +149,8 @@ They stop what `timeout` stops.
 
 libpandoc's own options: `untrusted = true` (for options from code you
 don't trust: only those that read, write, fetch and run nothing, with
-pandoc's sandbox on; with `cancel`, the token goes inside it),
+pandoc's sandbox on; with `cancel`, the token goes inside it; `untrusted =
+Dict("panclude-roots" => [dirs])` gives the include step those roots),
 `citeproc_files = Dict(name => text)` (citeproc's files given as their
 contents, for a conversion in pandoc's sandbox, `sandbox = true` or
 `untrusted = true`: the README's wasm filter item), and `timeout`

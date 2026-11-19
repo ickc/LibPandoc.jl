@@ -43,7 +43,9 @@ README's "Security"): the filters above run in this process as without it
 filters inside, JSON filters not at all.
 
 They are looked for as pandoc does (as given, then in the user data
-directory's `filters/`). Other filters run as with pandoc. Installed as an
+directory's `filters/`). Other filters run as with pandoc. `-F panclude`
+is libpandoc's include step, never a package, script or program of that
+name (a program runs as `-F ./panclude`). Installed as an
 app (`pkg> app add LibPandoc`) this is the `pandocjl` command; `julia -m
 LibPandoc ARGS` is the same. Outside the REPL (`isinteractive()` false) it
 makes Ctrl-C end the process at once, as pandoc's does

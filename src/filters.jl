@@ -132,9 +132,14 @@ _julia_filter(f::Pair{<:Any, Symbol}) = Pair{Any, Symbol}(f.first, f.second)
 _julia_filter(f) = Pair{Any, Symbol}(f, :typewise)
 _is_julia_filter(f) = !(f isa Union{AbstractString, AbstractDict, RawFilter, WasmFilter})
 
-# A JSON filter's path, as pandoc reads the "filters" option.
-_json_path(f::AbstractString) = (f == "citeproc" || endswith(lowercase(f), ".lua")) ? nothing : String(f)
-_json_path(f::AbstractDict) = get(f, "type", nothing) == "json" ? String(f["path"]) : nothing
+# A JSON filter's path, as pandoc reads the "filters" option. Not the
+# include step's name (libpandoc 1.15: "panclude", -F panclude), which
+# libpandoc runs, whatever a file or package of that name is (a program
+# named so runs as ./panclude).
+const _PANCLUDE = "panclude"
+_not_panclude(path) = path == _PANCLUDE ? nothing : path
+_json_path(f::AbstractString) = (f == "citeproc" || endswith(lowercase(f), ".lua")) ? nothing : _not_panclude(String(f))
+_json_path(f::AbstractDict) = get(f, "type", nothing) == "json" ? _not_panclude(String(f["path"])) : nothing
 _json_path(f) = nothing
 
 _walk(f, script = false) = (p = _julia_filter(f); _Walk(p.first, p.second, script))

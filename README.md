@@ -180,7 +180,8 @@ reader keeps in memory, such as a docx's images, reaches the writer):
 - **Wasm filters** (`"foo.wasm"`, or `WasmFilter(path)`), in this process.
   They, and scripts run as a subprocess, get the variables libpandoc gives
   JSON filters (`PANDOC_WRITER_OPTIONS` among them).
-- pandoc's own: Lua filters, JSON filters (programs), `"citeproc"`.
+- pandoc's own: Lua filters, JSON filters (programs), `"citeproc"`, and
+  the include step `"panclude"` (below).
 
 A filter may call pandoc. `Pandoc.read(text, ctx.conversion)` parses a
 fragment the way the document was read, and `read_many` parses many at
@@ -238,6 +239,61 @@ next to nothing adds about 0.35 s (a Lua filter, given elements as it asks
 for them, 0.09 s); pandoc's own encoding and decoding of the JSON is most
 of it. Consecutive filters of this process pay it once.
 
+## The include step: panclude
+
+[panclude](https://github.com/ickc/panclude)'s `include` attribute is
+built into libpandoc (1.15): a code block, raw block or div naming a file
+is filled with it inside the conversion, so that every filter after the
+step sees the content as if the document held it. It is off unless named
+among the filters: `filters = ["panclude", ...]`, or `pandocjl -F
+panclude`; first, before the filters that are to see the content.
+
+````markdown
+```{.parse include="part.md"}
+placeholder
+```
+````
+
+```sh
+pandocjl -F panclude -F parse.wasm -F upper.wasm doc.md
+```
+
+libpandoc-rs's example filters `parse.wasm` (the block's text read as
+markdown) and `upper.wasm` (upper-cased) are given no directory, yet get
+`part.md`'s text: the step put it into the document. Without `-F
+panclude` they get `placeholder`.
+
+**Roots.** The step reads only inside its roots: by default the main
+document's directory (its first input file's; the working directory when
+the input is given to `convert`), or those an entry names instead,
+`Dict("type" => "panclude", "roots" => ["chapters", "/srv/shared"])`
+(relative ones from the working directory; one that isn't a directory, or
+another key, is a `PandocError`). A path outside them (`../x`, an absolute
+path elsewhere, a symbolic link leading out) is not read: the element
+stays as it was, with a warning (`@warn`: `[ScriptingWarning] Scripting
+warning: panclude: cannot include "../x" in doc.md: outside the roots`),
+which `fail_if_warnings = true` makes an error.
+
+**Sandboxes.** With `sandbox = true` (`--sandbox`) only roots named
+count: `"panclude"` alone reads nothing. With `untrusted = true` the
+options may name the step, `filters = ["panclude"]`, not its roots, and it
+reads nothing; the host gives roots in `untrusted`'s value, `untrusted =
+Dict("panclude-roots" => [...])`, which the code's options can't name (a
+cancel token, `cancel` or Ctrl-C's, goes in beside them). A wasm filter's
+calls to pandoc are given none: a filter naming the step in a call reads
+nothing. In the directory sandbox the step reads only inside the mounted
+directories, its roots named as the module sees them, untouched like the
+options' other paths (the same paths on Unix; on Windows relative ones
+with `/`, or `/c/...` for `C:\...`); a root not mounted is no directory
+there, a `PandocError`.
+
+**The name** is reserved: `"panclude"` is never a Julia script or a
+program in the working directory (`./panclude` is), nor a package's
+filter in `pandocjl`.
+
+The syntax (line ranges, `raw=`, a div filled with a document, nested
+includes) and the warnings: [panclude](https://github.com/ickc/panclude).
+
 ## Consecutive filters
 
 pandoc hands a filter in this process the whole document as its JSON and
@@ -247,7 +303,7 @@ filters of this process share one exchange, by default**: Julia functions
 (with their `traverse`), `RawFilter`s, Julia filter scripts (in process or
 as a subprocess), packages' filters (pandocjl's `-F Name`) and wasm
 filters (`WasmFilter`, `.wasm` paths). One of pandoc's own (a Lua filter,
-a JSON filter program, `citeproc`) ends a run. The same in `convert`,
+a JSON filter program, `citeproc`, the include step) ends a run. The same in `convert`,
 `read`, `write`, `pandocjl` (`-F a.jl -F b.jl`) and the directory sandbox.
 Within a run, from one filter to the next:
 
@@ -459,7 +515,8 @@ pandocjl -F other-filter input.md              # anything else: as pandoc does
   checks them, `"untrusted"`: the same for every host), so the calls read
   no file, not even one the filter can read itself: for citeproc, the
   filter reads the bibliography, style and abbreviations itself and gives
-  them as their contents (below). A filter can't name a cancel token
+  them as their contents (below); the include step, named in a call,
+  reads nothing. A filter can't name a cancel token
   (`"untrusted"` is written over what it wrote); its calls stop with the
   conversion they run in. Limits, which
   pandoc has for no filter: `$LIBPANDOC_WASM_TIMEOUT` (seconds, as
@@ -692,7 +749,7 @@ exists, a container at least, a virtual machine better.
 
 ## Installing
 
-LibPandoc.jl needs Julia 1.12 or later, and libpandoc 1.14 or a later
+LibPandoc.jl needs Julia 1.12 or later, and libpandoc 1.15 or a later
 1.x (its ABI version, checked when the library is loaded). It finds libpandoc:
 `$LIBPANDOC_PATH` (the library), else `$LIBPANDOC_PREFIX` or
 `$CONDA_PREFIX` (a prefix with `lib/libpandoc.so`, `.dylib`, or
